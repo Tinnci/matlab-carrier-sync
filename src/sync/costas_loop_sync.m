@@ -1,4 +1,4 @@
-function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier)
+function [freq_error, snr_estimate, debug_info] = costas_loop_sync(signal, fs, f_carrier)
     % Costas环法实现载波同步
     % 输入参数:
     %   signal: 输入信号
@@ -7,6 +7,7 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier)
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
+    %   debug_info: 调试信息结构体
     
     % Costas环参数
     damping = 0.707;   % 临界阻尼
@@ -22,6 +23,7 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier)
     freq = 0;
     freq_history = zeros(1, N);
     phase_history = zeros(1, N);
+    noise_bw_history = zeros(1, N);
     
     % 环路滤波器系数计算
     K1 = 4 * damping * noise_bw / (1 + 2 * damping * noise_bw + noise_bw^2);
@@ -54,8 +56,9 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier)
         phase = mod(phase + pi, 2*pi) - pi;
         
         % 记录历史
-        freq_history(n) = freq;
+        freq_history(n) = freq * fs / (2*pi);  % 转换为Hz
         phase_history(n) = phase;
+        noise_bw_history(n) = noise_bw;
     end
     
     % 计算频率误差（使用稳态频率）
@@ -63,7 +66,7 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier)
     avg_freq_radians = mean(freq_history(steady_state_start:end));
     
     % 转换为Hz
-    freq_error = avg_freq_radians * fs / (2 * pi);
+    freq_error = avg_freq_radians;
     
     % 改进的SNR估计
     % 使用稳态I/Q信号的功率比
@@ -82,23 +85,32 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier)
     % 限制SNR估计的范围，避免不合理的值
     snr_estimate = min(max(snr_estimate, 0), 40);
     
-    % 调试绘图（仅在需要时取消注释）
-    % figure;
-    % subplot(3,1,1);
-    % plot(freq_history * fs / (2*pi));
-    % title('频率历史 (Hz)');
-    % xlabel('样本');
-    % ylabel('频率 (Hz)');
-    % 
-    % subplot(3,1,2);
-    % plot(phase_history);
-    % title('相位历史');
-    % xlabel('样本');
-    % ylabel('相位 (rad)');
-    % 
-    % subplot(3,1,3);
-    % plot(error);
-    % title('误差信号');
-    % xlabel('样本');
-    % ylabel('误差');
+    % 计算收敛时间
+    conv_time = calculate_convergence_time(freq_history, freq_error);
+    
+    % 构建调试信息结构体
+    debug_info = struct(...
+        'freq_history', freq_history, ...
+        'phase_history', phase_history, ...
+        'noise_bw_history', noise_bw_history, ...
+        'error_signal', error, ...
+        'initial_freq_error', freq_history(1), ...
+        'initial_snr', snr_estimate, ...
+        'conv_time', conv_time);
+end
+
+function conv_time = calculate_convergence_time(freq_history, final_freq)
+    % 计算收敛时间
+    % 定义收敛阈值（最终值的5%）
+    threshold = abs(final_freq) * 0.05;
+    
+    % 找到首次进入阈值范围的时间点
+    freq_error = abs(freq_history - final_freq);
+    conv_indices = find(freq_error <= threshold, 1);
+    
+    if isempty(conv_indices)
+        conv_time = length(freq_history);  % 未收敛
+    else
+        conv_time = conv_indices;
+    end
 end 

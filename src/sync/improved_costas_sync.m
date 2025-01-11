@@ -47,14 +47,22 @@ function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, f
     fft_size = 2^nextpow2(length(signal));
     freq_resolution = fs/fft_size;
     
-    % Costas环参数（来自优化结果）
-    damping = 0.5;
-    initial_noise_bw = 0.1;  % 捕获阶段带宽
-    final_noise_bw = 0.02;   % 跟踪阶段带宽
-    freq_max = 10;           % Hz
+    % Costas环参数（低SNR优化）
+    damping = 0.707;  % 临界阻尼
+    initial_noise_bw = 0.05;  % 降低初始带宽，减少噪声影响
+    final_noise_bw = 0.01;    % 降低最终带宽，提高精度
+    freq_max = 20;            % 增大频率范围
     
     % 预同步：FFT粗频率估计
     [initial_freq_error, initial_snr] = fft_presync(signal, fs, f_carrier, fft_size);
+    
+    % 根据SNR调整参数
+    if initial_snr < 0
+        % 低SNR条件下的参数调整
+        damping = 0.8;        % 增加阻尼
+        initial_noise_bw = initial_noise_bw * 0.5;  % 进一步降低带宽
+        final_noise_bw = final_noise_bw * 0.5;
+    end
     
     % 初始化变量
     N = length(signal);
@@ -107,14 +115,18 @@ function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, f
     % 使用稳态数据计算最终结果
     [freq_error, snr_estimate] = calculate_final_estimates(freq_history, I_arm, Q_arm, fs);
     
+    % 计算收敛时间
+    conv_time = calculate_convergence_time(freq_history, fs, freq_error);
+    
     % 收集调试信息
     debug_info = struct(...
-        'freq_history', freq_history * fs/(2*pi), ...
+        'freq_history', freq_history * fs/(2*pi), ...  % 转换为Hz
         'phase_history', phase_history, ...
         'noise_bw_history', noise_bw_history, ...
         'error_signal', error, ...
         'initial_freq_error', initial_freq_error, ...
-        'initial_snr', initial_snr);
+        'initial_snr', initial_snr, ...
+        'conv_time', conv_time);
 end
 
 function [freq_error, snr] = fft_presync(signal, fs, f_carrier, fft_size)
@@ -131,17 +143,30 @@ function [freq_error, snr] = fft_presync(signal, fs, f_carrier, fft_size)
     search_range = 50;  % Hz
     carrier_bin = round(f_carrier*fft_size/fs) + 1;
     search_start = max(1, carrier_bin - round(search_range*fft_size/fs));
-    search_end = min(fft_size/2, carrier_bin + round(search_range*fft_size/fs));
+    search_end = min(length(magnitude), carrier_bin + round(search_range*fft_size/fs));
+    
+    % 确保搜索范围有效
+    if search_start >= search_end || search_start < 1 || search_end > length(magnitude)
+        % 如果搜索范围无效，使用整个频谱
+        search_start = 1;
+        search_end = length(magnitude);
+    end
     
     [~, max_idx] = max(magnitude(search_start:search_end));
-    peak_freq = freq(search_start + max_idx - 1);
+    max_idx = max_idx + search_start - 1;  % 调整为全局索引
+    peak_freq = freq(max_idx);
     
     % 计算频率误差
     freq_error = peak_freq - f_carrier;
     
     % 估计SNR
-    signal_power = mean(magnitude(max_idx-2:max_idx+2).^2);
-    noise_power = mean(magnitude([1:max_idx-5, max_idx+5:end]).^2);
+    % 确保索引范围有效
+    signal_range = max(1, max_idx-2):min(length(magnitude), max_idx+2);
+    noise_range = [max(1, max_idx-50):max(1, max_idx-5), ...
+                  min(length(magnitude), max_idx+5):min(length(magnitude), max_idx+50)];
+    
+    signal_power = mean(magnitude(signal_range).^2);
+    noise_power = mean(magnitude(noise_range).^2);
     snr = 10*log10(signal_power/noise_power);
 end
 
@@ -198,4 +223,23 @@ function [freq_error, snr_estimate] = calculate_final_estimates(freq_history, I_
     
     snr_estimate = 10*log10(signal_power/noise_power);
     snr_estimate = min(max(snr_estimate, 0), 40);  % 限制范围
+end
+
+function conv_time = calculate_convergence_time(freq_history, fs, final_freq)
+    % 计算收敛时间
+    % 将频率历史转换为Hz
+    freq_hz = freq_history * fs/(2*pi);
+    
+    % 定义收敛阈值（最终值的5%）
+    threshold = abs(final_freq) * 0.05;
+    
+    % 找到首次进入阈值范围的时间点
+    freq_error = abs(freq_hz - final_freq);
+    conv_indices = find(freq_error <= threshold, 1);
+    
+    if isempty(conv_indices)
+        conv_time = length(freq_history);  % 未收敛
+    else
+        conv_time = conv_indices;
+    end
 end 

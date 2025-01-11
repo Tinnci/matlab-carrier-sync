@@ -67,9 +67,13 @@ function [freq_error, snr_estimate, debug_info] = multi_stage_costas_sync(signal
     
     % 收集调试信息
     debug_info = struct(...
-        'coarse_stage', struct('freq_error', coarse_freq_error, 'snr', initial_snr), ...
-        'fine_stage', struct('freq_error', refined_freq_error, 'snr', refined_snr), ...
-        'tracking_stage', tracking_info);
+        'freq_history', tracking_info.freq_history, ...
+        'phase_history', tracking_info.phase_history, ...
+        'noise_bw_history', tracking_info.bw_history, ...
+        'error_signal', tracking_info.error_history, ...
+        'initial_freq_error', coarse_freq_error, ...
+        'initial_snr', initial_snr, ...
+        'conv_time', calculate_convergence_time(tracking_info.freq_history, final_freq_error));
 end
 
 function [freq_error, snr] = wide_range_fft_search(signal, fs, f_carrier)
@@ -234,17 +238,43 @@ function [freq_error, snr_estimate, debug_info] = adaptive_costas_tracking(...
         phase = mod(phase + pi, 2*pi) - pi;
         
         % 记录历史
-        freq_history(n) = freq;
+        freq_history(n) = freq * fs/(2*pi);  % 转换为Hz
         phase_history(n) = phase;
     end
     
     % 计算最终结果
-    [freq_error, snr_estimate] = calculate_final_estimates(...
-        freq_history, signal, fs, f_carrier);
+    steady_state_start = floor(N * 0.7);  % 使用后30%的数据
+    freq_error = mean(freq_history(steady_state_start:end));
+    
+    % 计算SNR
+    segment_length = floor(fs/10);  % 0.1秒segments
+    num_segments = floor((N-steady_state_start+1)/segment_length);
+    snr_estimates = zeros(1, num_segments);
+    
+    for i = 1:num_segments
+        start_idx = steady_state_start + (i-1)*segment_length;
+        end_idx = min(start_idx + segment_length - 1, N);
+        segment = signal(start_idx:end_idx);
+        
+        % 使用Welch方法估计功率谱
+        [pxx, f] = pwelch(segment, [], [], [], fs);
+        
+        % 自适应信号带宽
+        center_freq = f_carrier + freq_error;
+        signal_band = abs(f - center_freq) <= max(2, abs(freq_error)/5);
+        
+        signal_power = mean(pxx(signal_band));
+        noise_power = mean(pxx(~signal_band));
+        snr_estimates(i) = 10*log10(signal_power/noise_power);
+    end
+    
+    % 去除异常值后平均
+    snr_estimate = median(snr_estimates);
+    snr_estimate = min(max(snr_estimate, 0), 40);  % 限制范围
     
     % 调试信息
     debug_info = struct(...
-        'freq_history', freq_history * fs/(2*pi), ...
+        'freq_history', freq_history, ...
         'phase_history', phase_history, ...
         'error_history', error_history, ...
         'bw_history', bw_history);
@@ -351,4 +381,26 @@ function freq = limit_frequency(freq, freq_max, fs)
     
     % 限幅
     freq = max(min(freq, freq_max_rad), -freq_max_rad);
+end
+
+function conv_time = calculate_convergence_time(freq_history, final_freq)
+    % 计算收敛时间
+    % 输入参数:
+    %   freq_history: 频率估计历史记录
+    %   final_freq: 最终频率估计值
+    % 输出参数:
+    %   conv_time: 收敛时间点（样本数）
+    
+    % 定义收敛阈值（最终值的5%）
+    threshold = abs(final_freq) * 0.05;
+    
+    % 找到首次进入阈值范围的时间点
+    freq_error = abs(freq_history - final_freq);
+    conv_indices = find(freq_error <= threshold, 1);
+    
+    if isempty(conv_indices)
+        conv_time = length(freq_history);  % 未收敛
+    else
+        conv_time = conv_indices;
+    end
 end 
