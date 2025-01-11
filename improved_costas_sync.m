@@ -80,8 +80,8 @@ function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, f
         [K1, K2] = calculate_loop_coefficients(current_noise_bw, damping);
         
         % 生成本地载波
-        I_carrier = cos(2*pi*f_carrier*n/fs + phase);
-        Q_carrier = -sin(2*pi*f_carrier*n/fs + phase);
+        I_carrier = cos(2*pi*f_carrier*(n-1)/fs + phase);
+        Q_carrier = -sin(2*pi*f_carrier*(n-1)/fs + phase);
         
         % I/Q解调
         I_arm(n) = signal(n) * I_carrier;

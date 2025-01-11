@@ -34,8 +34,8 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier)
     
     for n = 1:N
         % 生成本地载波
-        I_carrier = cos(2 * pi * f_carrier * n / fs + phase);
-        Q_carrier = -sin(2 * pi * f_carrier * n / fs + phase);
+        I_carrier = cos(2 * pi * f_carrier * (n-1) / fs + phase);
+        Q_carrier = -sin(2 * pi * f_carrier * (n-1) / fs + phase);
         
         % I/Q解调
         I_arm(n) = signal(n) * I_carrier;

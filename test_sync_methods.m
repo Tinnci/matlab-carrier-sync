@@ -50,7 +50,8 @@ function test_sync_methods()
     for f_offset = freq_offsets
         for snr = snrs
             % 生成测试信号
-            t = 0:1/fs:signal_length;
+            N = floor(fs * signal_length);  % 确保采样点数量正确
+            t = (0:N-1)/fs;  % 生成对应的时间向量
             modulated_signal = cos(2*pi*(f_carrier + f_offset)*t);
             noisy_signal = awgn(modulated_signal, snr);
             
