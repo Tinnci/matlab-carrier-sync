@@ -1,6 +1,15 @@
 % 主程序文件
 % 运行载波同步系统测试
 
+% 获取当前脚本所在目录
+current_dir = fileparts(mfilename('fullpath'));
+
+% 添加所需路径
+addpath(fullfile(current_dir, 'src', 'sync'));
+addpath(fullfile(current_dir, 'src', 'optimization'));
+addpath(fullfile(current_dir, 'test', 'sync'));
+addpath(fullfile(current_dir, 'utils', 'common'));
+
 % 清理工作空间
 clear;
 clc;
