@@ -76,7 +76,7 @@ function error = improved_phase_detector(I, Q)
 
     % 加入软判决
     amplitude = sqrt(I^2 + Q^2);
-    confidence = amplitude * tanh(amplitude);  % 使用tanh限制误差幅度
+    confidence = amplitude .* tanh(amplitude);  % 使用tanh限制误差幅度
     error = error .* confidence;
 end
 

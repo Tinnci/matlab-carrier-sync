@@ -45,12 +45,9 @@ function [freq_error, snr] = wide_range_fft_search(signal, fs, f_carrier, fft_si
         @blackman
     };
 
-    freq = (-fft_size/2:fft_size/2-1)*(fs/fft_size);
+    freq = (-fft_size/2:fft_size/2-1)*(fs / fft_size);
     search_width_bins = round(search_range * fft_size / fs);
-    carrier_bin = find(freq >= f_carrier, 1);
-    if isempty(carrier_bin)
-        error('载波频率超出FFT频谱范围。');
-    end
+    [~, carrier_bin] = min(abs(freq - f_carrier));
     search_start = carrier_bin - search_width_bins;
     search_end = carrier_bin + search_width_bins;
     search_start = max(1, search_start);
@@ -67,14 +64,14 @@ function [freq_error, snr] = wide_range_fft_search(signal, fs, f_carrier, fft_si
     end
 
     % 在扩展后的搜索范围内搜索峰值
-    [~, max_idx] = max(avg_spectrum(search_indices));
-    peak_freq = freq(search_indices(max_idx));
+    [~, max_idx_local] = max(avg_spectrum(search_indices));
+    peak_freq = freq(search_indices(max_idx_local));
 
     % 使用抛物线插值提高频率分辨率
-    if max_idx > 1 && max_idx < length(search_indices)
-        alpha = avg_spectrum(search_indices(max_idx-1));
-        beta = avg_spectrum(search_indices(max_idx));
-        gamma = avg_spectrum(search_indices(max_idx+1));
+    if max_idx_local > 1 && max_idx_local < length(search_indices)
+        alpha = avg_spectrum(search_indices(max_idx_local-1));
+        beta = avg_spectrum(search_indices(max_idx_local));
+        gamma = avg_spectrum(search_indices(max_idx_local+1));
         offset = 0.5 * (alpha - gamma) / (alpha - 2*beta + gamma);
         peak_freq = peak_freq + offset * fs / fft_size;
     end

@@ -18,6 +18,8 @@ Volume serial number is .
 │   │   ├───costas_loop_sync.m
 │   │   ├───improved_costas_sync.m
 │   │   ├───multi_stage_costas_sync.m
+│   │   ├───particle_filter_sync.m
+│   │   ├───pll_sync.m
 │   │   ├───square_law_sync.m
 ├───test
 │   ├───sync
@@ -25,10 +27,8 @@ Volume serial number is .
 ├───.gitignore
 ├───concat_matlab_files.ps1
 ├───main.m
-├───optimization_results.txt
 ├───README.md
 ├───run_matlab_script.ps1
-├───sync_results.txt
 ```
 
 ### 目录列表
@@ -50,6 +50,8 @@ Volume serial number is .
 - src\sync\costas_loop_sync.m
 - src\sync\improved_costas_sync.m
 - src\sync\multi_stage_costas_sync.m
+- src\sync\particle_filter_sync.m
+- src\sync\pll_sync.m
 - src\sync\square_law_sync.m
 - test\sync\test_sync_methods.m
 
@@ -62,6 +64,7 @@ Volume serial number is .
 ### main.m
 
 ```matlab
+% main.m
 % 主程序文件
 % 运行载波同步系统测试
 
@@ -87,11 +90,12 @@ test_sync_methods();
 ```matlab
 % optimize_costas_params.m
 %{
+优化Costas环参数
+
 问题描述：
-Costas环参数优化器的开发背景：
 1. 当前Costas环存在以下问题：
    - 小频偏（0.5~2 Hz）时性能很好
-   - 大频偏（5~20 Hz）时完全失锁
+   - 大频偏（5~150 Hz）时性能不稳定
    - SNR估计普遍偏低
 
 2. 参数选择的困境：
@@ -106,7 +110,7 @@ Costas环参数优化器的开发背景：
    - 改善SNR估计准确度
 
 优化方法：
-1. 使用网格搜索遍历参数空间
+1. 使用并行网格搜索遍历参数空间
 2. 对每组参数进行Monte Carlo测试
 3. 综合评估频率误差和SNR误差
 4. 选择最优参数组合
@@ -116,148 +120,166 @@ function best_params = optimize_costas_params()
     % 优化Costas环参数
     % 输出:
     %   best_params: 结构体，包含最优参数
-    
+
     % 测试参数设置
-    freq_offsets = [0.5, 1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];  % Hz 扩展到100Hz
+    freq_offsets = [0.5, 1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 150];  % Hz 扩展到150Hz
     snrs = [10, 20, 30];  % dB
     fs = 1000;  % Hz
     f_carrier = 100;  % Hz
     signal_length = 10;  % 秒
     monte_carlo_runs = 10;  % 每组参数测试次数
-    
+
     % 参数搜索范围
     noise_bw_range = [0.01, 0.02, 0.05, 0.1, 0.2, 0.3];  % 扩展到0.3
     damping_range = [0.4, 0.5, 0.6, 0.707, 1.0];  % 包含更低的阻尼系数
     freq_max_range = [10, 25, 50, 100, 150];  % 扩展到150Hz
-    
-    % 初始化最优结果
-    best_score = -inf;
-    best_params = struct();
-    
+
+    % 使用 ndgrid 生成所有组合
+    [A, B, C] = ndgrid(noise_bw_range, damping_range, freq_max_range);
+    param_combinations = [A(:), B(:), C(:)];
+    num_combinations = size(param_combinations, 1);
+
+    % 初始化评分数组
+    scores = zeros(num_combinations, 1);
+
     % 创建结果文件
     fid = fopen('optimization_results.txt', 'w');
     fprintf(fid, 'Costas环参数优化结果\n');
     fprintf(fid, '===================\n\n');
-    
-    % 参数网格搜索
-    for noise_bw = noise_bw_range
-        for damping = damping_range
-            for freq_max = freq_max_range
-                % 当前参数组合的性能统计
-                total_score = 0;
-                freq_errors = [];
-                snr_errors = [];
-                
-                % 对每种测试条件进行多次Monte Carlo测试
-                for f_offset = freq_offsets
-                    for snr = snrs
-                        for run = 1:monte_carlo_runs
-                            % 生成测试信号
-                            t = 0:1/fs:signal_length;
-                            modulated_signal = cos(2*pi*(f_carrier + f_offset)*t);
-                            noisy_signal = awgn(modulated_signal, snr);
-                            
-                            % 使用当前参数进行同步测试
-                            [freq_error, snr_est] = test_costas_params(noisy_signal, fs, f_carrier, ...
-                                noise_bw, damping, freq_max);
-                            
-                            % 计算误差
-                            freq_err_percent = abs((freq_error - f_offset)/f_offset) * 100;
-                            snr_err_db = abs(snr_est - snr);
-                            
-                            freq_errors = [freq_errors, freq_err_percent];
-                            snr_errors = [snr_errors, snr_err_db];
-                        end
-                    end
-                end
-                
-                % 计算性能得分
-                % 频率误差权重更大，因为这是主要优化目标
-                freq_score = -mean(freq_errors);  % 负值因为误差越小越好
-                snr_score = -mean(snr_errors);
-                total_score = freq_score * 0.8 + snr_score * 0.2;
-                
-                % 记录结果
-                fprintf(fid, '参数组合:\n');
-                fprintf(fid, 'noise_bw: %.3f\n', noise_bw);
-                fprintf(fid, 'damping: %.3f\n', damping);
-                fprintf(fid, 'freq_max: %.1f Hz\n', freq_max);
-                fprintf(fid, '平均频率误差: %.2f%%\n', -freq_score);
-                fprintf(fid, '平均SNR误差: %.2f dB\n', -snr_score);
-                fprintf(fid, '总得分: %.2f\n\n', total_score);
-                
-                % 更新最优参数
-                if total_score > best_score
-                    best_score = total_score;
-                    best_params.noise_bw = noise_bw;
-                    best_params.damping = damping;
-                    best_params.freq_max = freq_max;
-                    best_params.score = total_score;
-                end
+
+    % 开启并行池
+    pool = gcp('nocreate');
+    if isempty(pool)
+        parpool;
+    end
+
+    % 并行参数搜索
+    parfor idx = 1:num_combinations
+        noise_bw = param_combinations(idx, 1);
+        damping = param_combinations(idx, 2);
+        freq_max = param_combinations(idx, 3);
+
+        % 当前参数组合的性能统计
+        freq_errors = [];
+        snr_errors = [];
+
+        % 对每种测试条件进行多次Monte Carlo测试
+        for f_offset = freq_offsets
+            for snr = snrs
+                % 生成预先的信号模板
+                t = 0:1/fs:signal_length;
+                modulated_signal = cos(2*pi*(f_carrier + f_offset)*t);
+                % 使用相同的随机种子确保信号一致性
+                rng(0);  
+                noisy_signal = awgn(modulated_signal, snr, 'measured');
+
+                % 使用当前参数进行同步测试
+                [freq_error, snr_est] = test_costas_params(noisy_signal, fs, f_carrier, ...
+                    noise_bw, damping, freq_max);
+
+                % 计算误差
+                freq_err_percent = abs((freq_error - f_offset)/f_offset) * 100;
+                snr_err_db = abs(snr_est - snr);
+
+                freq_errors = [freq_errors, freq_err_percent];
+                snr_errors = [snr_errors, snr_err_db];
             end
         end
+
+        % 计算性能得分
+        % 频率误差权重更大，因为这是主要优化目标
+        freq_score = -mean(freq_errors);  % 负值因为误差越小越好
+        snr_score = -mean(snr_errors);
+        total_score = freq_score * 0.8 + snr_score * 0.2;
+
+        % 存储得分
+        scores(idx) = total_score;
     end
-    
+
+    % 将得分添加到 param_combinations
+    param_combinations(:,4) = scores;
+
+    % 找到最优参数
+    [~, best_idx] = max(param_combinations(:,4));
+    best_params.noise_bw = param_combinations(best_idx, 1);
+    best_params.damping = param_combinations(best_idx, 2);
+    best_params.freq_max = param_combinations(best_idx, 3);
+    best_params.score = param_combinations(best_idx, 4);
+
+    % 记录所有参数组合的结果
+    for idx = 1:num_combinations
+        noise_bw = param_combinations(idx, 1);
+        damping = param_combinations(idx, 2);
+        freq_max = param_combinations(idx, 3);
+        total_score = param_combinations(idx, 4);
+
+        fprintf(fid, '参数组合:\n');
+        fprintf(fid, 'noise_bw: %.3f\n', noise_bw);
+        fprintf(fid, 'damping: %.3f\n', damping);
+        fprintf(fid, 'freq_max: %.1f Hz\n', freq_max);
+        fprintf(fid, '总得分: %.2f\n\n', total_score);
+    end
+
     % 记录最优参数
     fprintf(fid, '\n最优参数组合:\n');
     fprintf(fid, 'noise_bw: %.3f\n', best_params.noise_bw);
     fprintf(fid, 'damping: %.3f\n', best_params.damping);
     fprintf(fid, 'freq_max: %.1f Hz\n', best_params.freq_max);
     fprintf(fid, '最终得分: %.2f\n', best_params.score);
-    
+
     fclose(fid);
     fprintf('优化完成，结果已保存到 optimization_results.txt\n');
 end
 
 function [freq_error, snr_estimate] = test_costas_params(signal, fs, f_carrier, noise_bw, damping, freq_max)
     % 用于测试特定参数组合的Costas环性能
-    
+
     % 频率限幅设置
     freq_max_rad = 2*pi*freq_max/fs;
     freq_min_rad = -freq_max_rad;
-    
+
     % 初始化变量
     N = length(signal);
     phase = 0;
     freq = 0;
     freq_history = zeros(1, N);
-    
+
     % 环路滤波器系数计算
-    K1 = 4 * damping * noise_bw / (1 + 2 * damping * noise_bw + noise_bw^2);
-    K2 = 4 * noise_bw^2 / (1 + 2 * damping * noise_bw + noise_bw^2);
-    
-    % Costas环处理
+    [K1, K2] = calculate_loop_coefficients(noise_bw, damping);
+
+    % 初始化I/Q分支
     I_arm = zeros(1, N);
     Q_arm = zeros(1, N);
     error = zeros(1, N);
-    
+
     for n = 1:N
         % 生成本地载波
-        I_carrier = cos(2 * pi * f_carrier * n / fs + phase);
-        Q_carrier = -sin(2 * pi * f_carrier * n / fs + phase);
-        
+        I_carrier = cos(2 * pi * f_carrier * (n-1) / fs + phase);
+        Q_carrier = -sin(2 * pi * f_carrier * (n-1) / fs + phase);
+
         % I/Q解调
         I_arm(n) = signal(n) * I_carrier;
         Q_arm(n) = signal(n) * Q_carrier;
-        
+
         % 相位检测器
         error(n) = sign(I_arm(n)) * Q_arm(n);
-        
+
         % 环路滤波器
         freq = freq + K2 * error(n);
         freq = max(min(freq, freq_max_rad), freq_min_rad);
-        
+
+        % 相位更新
         phase = phase + freq + K1 * error(n);
         phase = mod(phase + pi, 2*pi) - pi;
-        
+
         freq_history(n) = freq;
     end
-    
+
     % 计算频率误差
     steady_state_start = floor(N * 0.7);
     avg_freq_radians = mean(freq_history(steady_state_start:end));
     freq_error = avg_freq_radians * fs / (2 * pi);
-    
+
     % 计算SNR估计
     I_steady = I_arm(steady_state_start:end);
     Q_steady = Q_arm(steady_state_start:end);
@@ -456,7 +478,7 @@ function error = improved_phase_detector(I, Q)
 
     % 加入软判决
     amplitude = sqrt(I^2 + Q^2);
-    confidence = amplitude * tanh(amplitude);  % 使用tanh限制误差幅度
+    confidence = amplitude .* tanh(amplitude);  % 使用tanh限制误差幅度
     error = error .* confidence;
 end
 
@@ -556,12 +578,9 @@ function [freq_error, snr] = wide_range_fft_search(signal, fs, f_carrier, fft_si
         @blackman
     };
 
-    freq = (-fft_size/2:fft_size/2-1)*(fs/fft_size);
+    freq = (-fft_size/2:fft_size/2-1)*(fs / fft_size);
     search_width_bins = round(search_range * fft_size / fs);
-    carrier_bin = find(freq >= f_carrier, 1);
-    if isempty(carrier_bin)
-        error('载波频率超出FFT频谱范围。');
-    end
+    [~, carrier_bin] = min(abs(freq - f_carrier));
     search_start = carrier_bin - search_width_bins;
     search_end = carrier_bin + search_width_bins;
     search_start = max(1, search_start);
@@ -578,14 +597,14 @@ function [freq_error, snr] = wide_range_fft_search(signal, fs, f_carrier, fft_si
     end
 
     % 在扩展后的搜索范围内搜索峰值
-    [~, max_idx] = max(avg_spectrum(search_indices));
-    peak_freq = freq(search_indices(max_idx));
+    [~, max_idx_local] = max(avg_spectrum(search_indices));
+    peak_freq = freq(search_indices(max_idx_local));
 
     % 使用抛物线插值提高频率分辨率
-    if max_idx > 1 && max_idx < length(search_indices)
-        alpha = avg_spectrum(search_indices(max_idx-1));
-        beta = avg_spectrum(search_indices(max_idx));
-        gamma = avg_spectrum(search_indices(max_idx+1));
+    if max_idx_local > 1 && max_idx_local < length(search_indices)
+        alpha = avg_spectrum(search_indices(max_idx_local-1));
+        beta = avg_spectrum(search_indices(max_idx_local));
+        gamma = avg_spectrum(search_indices(max_idx_local+1));
         offset = 0.5 * (alpha - gamma) / (alpha - 2*beta + gamma);
         peak_freq = peak_freq + offset * fs / fft_size;
     end
@@ -646,9 +665,190 @@ end
 ```
 
 
+### src\sync\particle_filter_sync.m
+
+```matlab
+% particle_filter_sync.m
+function [freq_error, snr_estimate, debug_info] = particle_filter_sync(signal, fs, f_carrier, num_particles, freq_max)
+    % 基于粒子滤波器的载波同步
+    % 输入参数:
+    %   signal: 输入信号
+    %   fs: 采样频率 (Hz)
+    %   f_carrier: 载波频率 (Hz)
+    %   num_particles: 粒子数量
+    %   freq_max: 最大频率偏移 (Hz)
+    % 输出参数:
+    %   freq_error: 估计的频率误差 (Hz)
+    %   snr_estimate: 估计的信噪比 (dB)
+    %   debug_info: 调试信息结构体
+
+    % 初始化粒子
+    particles = f_carrier + (rand(1, num_particles) - 0.5) * 2 * freq_max;
+    weights = ones(1, num_particles) / num_particles;
+
+    % 初始化变量
+    N = length(signal);
+    freq_history = zeros(1, N);
+
+    for n = 1:N
+        % 生成本地载波
+        t = (n-1)/fs;
+        I_carrier = cos(2 * pi * particles * t);
+        Q_carrier = -sin(2 * pi * particles * t);
+
+        % I/Q解调
+        I_arm = signal(n) * I_carrier;
+        Q_arm = signal(n) * Q_carrier;
+
+        % 计算观测
+        obs = atan2(Q_arm, I_arm);
+
+        % 计算权重
+        weights = weights .* exp(-(obs).^2 / (2*(0.1)^2));
+        weights = weights / sum(weights);
+
+        % 重采样
+        indices = resample_particles(weights);
+        particles = particles(indices);
+        weights = ones(1, num_particles) / num_particles;
+
+        % 估计频率
+        freq_history(n) = mean(particles);
+    end
+
+    % 计算频率误差
+    steady_state_start = floor(N * 0.7);
+    avg_freq = mean(freq_history(steady_state_start:end));
+    freq_error = avg_freq - f_carrier;
+
+    % 计算SNR估计
+    I_steady = signal(steady_state_start:end) .* cos(2*pi*f_carrier*(steady_state_start:N)/fs);
+    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*f_carrier*(steady_state_start:N)/fs);
+    signal_power = mean(I_steady.^2);
+    noise_power = mean(Q_steady.^2);
+    snr_estimate = 10 * log10(signal_power / noise_power);
+    snr_estimate = min(max(snr_estimate, 0), 40);
+
+    % 收集调试信息
+    debug_info = struct(...
+        'freq_history', freq_history, ...
+        'particles', particles, ...
+        'weights', weights, ...
+        'freq_error', freq_error);
+end
+
+function indices = resample_particles(weights)
+    % 重采样粒子
+    % 输入参数:
+    %   weights: 粒子权重
+    % 输出参数:
+    %   indices: 重采样后的粒子索引
+
+    cumulative_sum = cumsum(weights);
+    cumulative_sum(end) = 1.0; % 避免精度问题
+    rand_vals = rand(1, length(weights));
+    indices = arrayfun(@(rv) find(cumulative_sum >= rv, 1), rand_vals);
+end
+```
+
+
+### src\sync\pll_sync.m
+
+```matlab
+% pll_sync.m
+function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier, loop_bw, damping, freq_max)
+    % 基于锁相环（PLL）的载波同步
+    % 输入参数:
+    %   signal: 输入信号
+    %   fs: 采样频率 (Hz)
+    %   f_carrier: 载波频率 (Hz)
+    %   loop_bw: 环路带宽
+    %   damping: 阻尼系数
+    %   freq_max: 最大频率偏移 (Hz)
+    % 输出参数:
+    %   freq_error: 估计的频率误差 (Hz)
+    %   snr_estimate: 估计的信噪比 (dB)
+    %   debug_info: 调试信息结构体
+
+    % 初始化变量
+    N = length(signal);
+    phase = 0;
+    freq = 0;
+    freq_history = zeros(1, N);
+
+    % 计算环路滤波器系数
+    [Kp, Ki] = calculate_pll_coefficients(loop_bw, damping, fs);
+
+    % 初始化I/Q分支
+    I_arm = zeros(1, N);
+    Q_arm = zeros(1, N);
+    error = zeros(1, N);
+
+    for n = 1:N
+        % 生成本地载波
+        I_carrier = cos(2 * pi * f_carrier * (n-1) / fs + phase);
+        Q_carrier = -sin(2 * pi * f_carrier * (n-1) / fs + phase);
+
+        % I/Q解调
+        I_arm(n) = signal(n) * I_carrier;
+        Q_arm(n) = signal(n) * Q_carrier;
+
+        % 相位检测器
+        error(n) = I_arm(n) * Q_arm(n);  % 基本PLL相位误差
+
+        % 环路滤波器
+        freq = freq + Ki * error(n);
+        freq = max(min(freq, freq_max), -freq_max);  % 频率限幅
+
+        % 相位更新
+        phase = phase + (Kp * error(n)) + freq;
+        phase = mod(phase + pi, 2*pi) - pi;
+
+        freq_history(n) = freq;
+    end
+
+    % 计算频率误差
+    steady_state_start = floor(N * 0.7);
+    avg_freq = mean(freq_history(steady_state_start:end));
+    freq_error = avg_freq;
+
+    % 计算SNR估计
+    I_steady = I_arm(steady_state_start:end);
+    Q_steady = Q_arm(steady_state_start:end);
+    signal_power = mean(I_steady.^2);
+    noise_power = mean(Q_steady.^2);
+    snr_estimate = 10 * log10(signal_power / noise_power);
+    snr_estimate = min(max(snr_estimate, 0), 40);
+
+    % 收集调试信息
+    debug_info = struct(...
+        'freq_history', freq_history, ...
+        'phase_history', phase, ...
+        'error_signal', error, ...
+        'freq_error', freq_error);
+end
+
+function [Kp, Ki] = calculate_pll_coefficients(loop_bw, damping, fs)
+    % 计算PLL的比例和积分增益
+    % 输入参数:
+    %   loop_bw: 环路带宽
+    %   damping: 阻尼系数
+    %   fs: 采样频率 (Hz)
+    % 输出参数:
+    %   Kp: 比例增益
+    %   Ki: 积分增益
+
+    theta = loop_bw / fs;
+    Kp = (2 * damping * theta) / (1 + 2 * damping * theta + theta^2);
+    Ki = (theta^2) / (1 + 2 * damping * theta + theta^2);
+end
+```
+
+
 ### src\sync\square_law_sync.m
 
 ```matlab
+% square_law_sync.m
 function [freq_error, snr_estimate] = square_law_sync(signal, fs, f_carrier)
     % 平方变换法实现载波同步
     % 输入参数:
@@ -658,45 +858,45 @@ function [freq_error, snr_estimate] = square_law_sync(signal, fs, f_carrier)
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
-    
+
     % 平方变换
     squared_signal = signal.^2;
-    
+
     % FFT分析
     N = length(squared_signal);
-    fft_result = fft(squared_signal);
+    fft_result = fft(squared_signal, 2^nextpow2(N));
     fft_result = fftshift(fft_result);
     magnitude = abs(fft_result);
-    freq = (-N/2:N/2-1) * (fs / N);
-    
+    freq = (-length(fft_result)/2:length(fft_result)/2-1) * (fs / length(fft_result));
+
     % 寻找二倍频成分的峰值
     expected_freq = 2 * f_carrier;  % 二倍载波频率
-    [~, center_idx] = min(abs(freq));  % 找到频谱中心点
-    search_width = floor(N / 8);  % 搜索范围宽度
-    search_start = max(1, center_idx + floor(expected_freq/(fs/N)) - search_width);
-    search_end = min(N, center_idx + floor(expected_freq/(fs/N)) + search_width);
+    [~, center_idx] = min(abs(freq - expected_freq));  % 找到接近二倍频的频谱点
+    search_width = floor(length(fft_result) / 16);  % 搜索范围宽度
+    search_start = max(1, center_idx - search_width);
+    search_end = min(length(fft_result), center_idx + search_width);
     search_range = search_start:search_end;
-    
+
     [peak_value, local_peak_idx] = max(magnitude(search_range));
     peak_idx = search_start + local_peak_idx - 1;
     peak_freq = freq(peak_idx);
-    
+
     % 计算频率误差（考虑二倍频的影响）
     freq_error = (peak_freq / 2) - f_carrier;
-    
+
     % 改进的SNR估计
     % 使用峰值周围的平均功率作为信号功率
-    signal_range = max(1, peak_idx - 2):min(N, peak_idx + 2);
+    signal_range = max(1, peak_idx - 2):min(length(freq), peak_idx + 2);
     signal_power = mean(magnitude(signal_range).^2);
-    
+
     % 排除峰值附近区域计算噪声功率
-    exclude_range = max(1, peak_idx - 10):min(N, peak_idx + 10);
     noise_magnitude = magnitude;
-    noise_magnitude(exclude_range) = [];
+    noise_magnitude(signal_range) = [];
     noise_power = mean(noise_magnitude.^2);
-    
+
     % 计算SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
+    snr_estimate = min(max(snr_estimate, 0), 40);  % 限制范围
 end 
 ```
 
@@ -712,12 +912,15 @@ function test_sync_methods()
     signal_length = 10; % 信号长度（秒）
 
     % 扩展测试条件
-    freq_offsets = [0.5, 1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];  % 扩展到100Hz
+    freq_offsets = [0.5, 1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 150];  % 扩展到150Hz
     snrs = [10, 20, 30];  % dB
+
+    % 调制方式
+    modulation_types = {'AM', 'BPSK', 'QPSK', '16-QAM'};
 
     % 创建结果文件
     fid = fopen('sync_results.txt', 'w');
-    fprintf(fid, '载波同步系统测试结果（第二版）\n');
+    fprintf(fid, '载波同步系统测试结果（第三版）\n');
     fprintf(fid, '===================\n\n');
 
     % 运行参数优化并获取最优参数
@@ -728,1607 +931,352 @@ function test_sync_methods()
     % 创建性能统计结构
     stats = initialize_statistics();
 
+    % 获取中文显示名称
+    display_names = stats.method_display_names;
+
     % 创建图形窗口
-    figure('Name', '同步性能对比', 'Position', [100, 100, 1200, 800]);
+    figure('Name', '同步性能对比', 'Position', [100, 100, 1600, 900]);
 
     % 对每种测试条件进行测试
-    for f_offset = freq_offsets
-        for snr = snrs
-            % 生成测试信号
-            N = floor(fs * signal_length);  % 确保采样点数量正确
-            t = (0:N-1)/fs;  % 生成对应的时间向量
-            modulated_signal = cos(2*pi*(f_carrier + f_offset)*t);
-            noisy_signal = awgn(modulated_signal, snr, 'measured');
+    for mod_type = modulation_types
+        current_mod = mod_type{1};
+        fprintf(fid, '=== 调制方式: %s ===\n\n', current_mod);
 
-            % 测试各种方法
-            % 1. 平方律法
-            tic;
-            [freq_error1, snr_est1] = square_law_sync(noisy_signal, fs, f_carrier);
-            time1 = toc;
-
-            % 2. 原始Costas环法（使用优化后的参数）
-            tic;
-            [freq_error2, snr_est2] = costas_loop_sync(noisy_signal, fs, f_carrier, ...
-                best_params.noise_bw, best_params.damping, best_params.freq_max);
-            time2 = toc;
-
-            % 3. 改进Costas环法（使用优化后的参数）
-            tic;
-            [freq_error3, snr_est3, debug3] = improved_costas_sync(noisy_signal, fs, f_carrier, ...
-                best_params.noise_bw, best_params.damping, best_params.freq_max);
-            time3 = toc;
-
-            % 4. 多级同步法（使用优化后的参数）
-            tic;
-            [freq_error4, snr_est4, debug4] = multi_stage_costas_sync(noisy_signal, fs, f_carrier, ...
-                best_params.noise_bw, best_params.damping, best_params.freq_max);
-            time4 = toc;
-
-            % 记录结果
-            fprintf(fid, '测试条件:\n');
-            fprintf(fid, '频率偏差: %.1f Hz\n', f_offset);
-            fprintf(fid, 'SNR: %.0f dB\n\n', snr);
-
-            % 记录各方法结果
-            methods = {'平方变换法', '原始Costas环法', '改进Costas环法', '多级同步法'};
-            freq_errors = [freq_error1, freq_error2, freq_error3, freq_error4];
-            snr_ests = [snr_est1, snr_est2, snr_est3, snr_est4];
-            times = [time1, time2, time3, time4];
-
-            for i = 1:length(methods)
-                fprintf(fid, '%s结果:\n', methods{i});
-                fprintf(fid, '估计频率误差: %.2f Hz\n', freq_errors(i));
-                fprintf(fid, '估计SNR: %.2f dB\n', snr_ests(i));
-                if f_offset ~= 0
-                    freq_err_percent = abs((freq_errors(i)-f_offset)/f_offset) * 100;
-                else
-                    freq_err_percent = 0;
+        for f_offset = freq_offsets
+            for snr = snrs
+                % 生成测试信号
+                N = floor(fs * signal_length);  % 确保采样点数量正确
+                t = (0:N-1)/fs;  % 生成对应的时间向量
+                switch current_mod
+                    case 'AM'
+                        modulated_signal = cos(2*pi*(f_carrier + f_offset)*t);
+                    case 'BPSK'
+                        data = randi([0 1], 1, N);
+                        bpsk_signal = 2*data - 1;
+                        modulated_signal = bpsk_signal .* cos(2*pi*(f_carrier + f_offset)*t);
+                    case 'QPSK'
+                        data = randi([0 3], 1, N);
+                        qpsk_signal = exp(1j * pi/2 * data);
+                        modulated_signal = real(qpsk_signal .* exp(1j*2*pi*(f_carrier + f_offset)*t));
+                    case '16-QAM'
+                        data = randi([0 15], 1, N);
+                        qam_signal = qammod(data, 16, 'UnitAveragePower', true);
+                        modulated_signal = real(qam_signal .* exp(1j*2*pi*(f_carrier + f_offset)*t));
+                    otherwise
+                        error('未知的调制方式: %s', current_mod);
                 end
-                fprintf(fid, '频率误差精度: %.2f%%\n', freq_err_percent);
-                fprintf(fid, '处理时间: %.3f 秒\n\n', times(i));
+                noisy_signal = awgn(modulated_signal, snr, 'measured');
 
-                % 更新统计信息
-                stats = update_statistics(stats, i, f_offset, snr, ...
-                    freq_err_percent, abs(snr_ests(i)-snr), times(i));
+                % 测试各种方法
+                % 1. 平方律法
+                tic;
+                [freq_error1, snr_est1] = square_law_sync(noisy_signal, fs, f_carrier);
+                time1 = toc;
+
+                % 2. 原始Costas环法（使用优化后的参数）
+                tic;
+                [freq_error2, snr_est2] = costas_loop_sync(noisy_signal, fs, f_carrier, ...
+                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                time2 = toc;
+
+                % 3. 改进Costas环法（使用优化后的参数）
+                tic;
+                [freq_error3, snr_est3, debug3] = improved_costas_sync(noisy_signal, fs, f_carrier, ...
+                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                time3 = toc;
+
+                % 4. 多级同步法（使用优化后的参数）
+                tic;
+                [freq_error4, snr_est4, debug4] = multi_stage_costas_sync(noisy_signal, fs, f_carrier, ...
+                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                time4 = toc;
+
+                % 5. PLL同步法
+                tic;
+                [freq_error5, snr_est5, debug5] = pll_sync(noisy_signal, fs, f_carrier, 1, 0.707, best_params.freq_max);
+                time5 = toc;
+
+                % 6. 粒子滤波器同步法
+                tic;
+                [freq_error6, snr_est6, debug6] = particle_filter_sync(noisy_signal, fs, f_carrier, 100, best_params.freq_max);
+                time6 = toc;
+
+                % 记录结果
+                fprintf(fid, '测试条件:\n');
+                fprintf(fid, '调制方式: %s\n', current_mod);
+                fprintf(fid, '频率偏差: %.1f Hz\n', f_offset);
+                fprintf(fid, 'SNR: %.0f dB\n\n', snr);
+
+                % 记录各方法结果
+                methods = {'square_law', 'original_costas', 'improved_costas', 'multi_stage', 'pll', 'particle_filter'};
+                freq_errors = [freq_error1, freq_error2, freq_error3, freq_error4, freq_error5, freq_error6];
+                snr_ests = [snr_est1, snr_est2, snr_est3, snr_est4, snr_est5, snr_est6];
+                times = [time1, time2, time3, time4, time5, time6];
+
+                for i = 1:length(methods)
+                    if f_offset ~= 0
+                        freq_err_percent = abs((freq_errors(i)-f_offset)/f_offset) * 100;
+                    else
+                        freq_err_percent = 0;
+                    end
+                    fprintf(fid, '%s结果:\n', display_names{i});
+                    fprintf(fid, '估计频率误差: %.2f Hz\n', freq_errors(i));
+                    fprintf(fid, '估计SNR: %.2f dB\n', snr_ests(i));
+                    fprintf(fid, '频率误差精度: %.2f%%\n', freq_err_percent);
+                    fprintf(fid, '处理时间: %.3f 秒\n\n', times(i));
+
+                    % 更新统计信息
+                    stats = update_statistics(stats, methods{i}, display_names{i}, f_offset, snr, ...
+                        freq_err_percent, abs(snr_ests(i)-snr), times(i));
+                end
+
+                fprintf(fid, '-------------------\n\n');
+
+                % 绘制同步过程（仅绘制多级同步器）
+                plot_sync_process(debug4, f_offset, snr, t, current_mod);
             end
-
-            fprintf(fid, '-------------------\n\n');
-
-            % 绘制同步过程（仅绘制多级同步器）
-            plot_sync_process(debug4, f_offset, snr, t);
         end
     end
 
-    % 输出统计摘要
-    print_statistics_summary(fid, stats, methods);
+    % 初始化统计结构
+    function stats = initialize_statistics()
+        stats = struct();
 
-    fclose(fid);
+        % 使用英文名称作为字段名称
+        methods = {'square_law', 'original_costas', 'improved_costas', 'multi_stage', 'pll', 'particle_filter'};
+
+        % 对应的中文显示名称
+        display_names = {'平方变换法', '原始Costas环法', '改进Costas环法', '多级同步法', 'PLL同步法', '粒子滤波器同步法'};
+
+        for i = 1:length(methods)
+            stats.(methods{i}).freq_errors = [];
+            stats.(methods{i}).snr_errors = [];
+            stats.(methods{i}).times = [];
+        end
+
+        % 将显示名称存储在结构体中
+        stats.method_display_names = display_names;
+    end
+
+    % 更新统计信息
+    function stats = update_statistics(stats, method, display_name, f_offset, snr, ...
+        freq_error_percent, snr_error, time)
+        stats.(method).freq_errors(end+1, :) = [f_offset, snr, freq_error_percent];
+        stats.(method).snr_errors(end+1, :) = [f_offset, snr, snr_error];
+        stats.(method).times(end+1, :) = [f_offset, snr, time];
+    end
+
+    % 输出统计摘要
+    function print_statistics_summary(fid, stats, modulation_types)
+        fprintf(fid, '\n性能统计摘要\n');
+        fprintf(fid, '===================\n\n');
+
+        methods = {'square_law', 'original_costas', 'improved_costas', 'multi_stage', 'pll', 'particle_filter'};
+        display_names = stats.method_display_names;
+
+        for i = 1:length(methods)
+            method = methods{i};
+            display_name = display_names{i};
+            fprintf(fid, '%s:\n', display_name);
+
+            % 频率误差统计
+            freq_errs = stats.(method).freq_errors(:,3);
+            fprintf(fid, '频率误差统计:\n');
+            fprintf(fid, '  平均值: %.2f%%\n', mean(freq_errs));
+            fprintf(fid, '  中位数: %.2f%%\n', median(freq_errs));
+            fprintf(fid, '  最大值: %.2f%%\n', max(freq_errs));
+            fprintf(fid, '  最小值: %.2f%%\n', min(freq_errs));
+            fprintf(fid, '  标准差: %.2f%%\n\n', std(freq_errs));
+
+            % SNR误差统计
+            snr_errs = stats.(method).snr_errors(:,3);
+            fprintf(fid, 'SNR误差统计:\n');
+            fprintf(fid, '  平均值: %.2f dB\n', mean(snr_errs));
+            fprintf(fid, '  中位数: %.2f dB\n', median(snr_errs));
+            fprintf(fid, '  最大值: %.2f dB\n', max(snr_errs));
+            fprintf(fid, '  最小值: %.2f dB\n', min(snr_errs));
+            fprintf(fid, '  标准差: %.2f dB\n\n', std(snr_errs));
+
+            % 处理时间统计
+            times = stats.(method).times(:,3);
+            fprintf(fid, '处理时间统计:\n');
+            fprintf(fid, '  平均值: %.3f 秒\n', mean(times));
+            fprintf(fid, '  中位数: %.3f 秒\n', median(times));
+            fprintf(fid, '  最大值: %.3f 秒\n', max(times));
+            fprintf(fid, '  最小值: %.3f 秒\n\n', min(times));
+        end
+    end
+
+    % 绘制同步过程
+    function plot_sync_process(debug_info, f_offset, snr, t, mod_type)
+        clf;
+
+        % 频率估计过程
+        subplot(3,2,1);
+        plot(t, debug_info.tracking_stage.freq_history);
+        hold on;
+        plot([t(1), t(end)], [f_offset, f_offset], 'r--');
+        title(sprintf('频率估计过程 (%s, offset=%.1fHz, SNR=%.0fdB)', mod_type, f_offset, snr));
+        xlabel('时间 (s)');
+        ylabel('频率 (Hz)');
+        legend('估计值', '实际值');
+        grid on;
+
+        % 相位估计过程
+        subplot(3,2,2);
+        plot(t, debug_info.tracking_stage.phase_history);
+        title('相位估计过程');
+        xlabel('时间 (s)');
+        ylabel('相位 (rad)');
+        grid on;
+
+        % 误差信号
+        subplot(3,2,3);
+        plot(t, debug_info.tracking_stage.error_signal);
+        title('误差信号');
+        xlabel('时间 (s)');
+        ylabel('误差');
+        grid on;
+
+        % 粒子分布（仅适用于粒子滤波器同步法）
+        subplot(3,2,4);
+        if isfield(debug_info.tracking_stage, 'particles') && isfield(debug_info.tracking_stage, 'weights')
+            scatter(debug_info.tracking_stage.particles, debug_info.tracking_stage.weights, 10, 'filled');
+            title('粒子滤波器分布');
+            xlabel('频率 (Hz)');
+            ylabel('权重');
+            grid on;
+        else
+            text(0.5, 0.5, '无粒子滤波器数据', 'HorizontalAlignment', 'center');
+            axis off;
+        end
+
+        % 频率历史
+        subplot(3,2,5);
+        plot(t, debug_info.tracking_stage.freq_history);
+        hold on;
+        plot([t(1), t(end)], [f_offset, f_offset], 'r--');
+        title('频率历史');
+        xlabel('时间 (s)');
+        ylabel('频率 (Hz)');
+        grid on;
+
+        % SNR历史
+        if isfield(debug_info.tracking_stage, 'snr_estimate')
+            subplot(3,2,6);
+            plot(t, debug_info.tracking_stage.snr_estimate);
+            title('SNR历史');
+            xlabel('时间 (s)');
+            ylabel('SNR (dB)');
+            grid on;
+        else
+            subplot(3,2,6);
+            text(0.5, 0.5, '无SNR历史数据', 'HorizontalAlignment', 'center');
+            axis off;
+        end
+
+        drawnow;
+        pause(0.1);
+    end
 
     % 绘制性能对比图
-    plot_performance_comparison(stats, freq_offsets, methods);
-end
+    function plot_performance_comparison(stats, freq_offsets, modulation_types)
+        % 创建性能对比图
+        figure('Name', '性能对比', 'Position', [100, 100, 1600, 900]);
 
-function stats = initialize_statistics()
-    % 初始化统计结构
-    stats = struct();
-    stats.freq_errors = cell(4,1);
-    stats.snr_errors = cell(4,1);
-    stats.times = cell(4,1);
-    for i = 1:4
-        stats.freq_errors{i} = [];
-        stats.snr_errors{i} = [];
-        stats.times{i} = [];
-    end
-end
+        methods = {'square_law', 'original_costas', 'improved_costas', 'multi_stage', 'pll', 'particle_filter'};
+        display_names = stats.method_display_names;
 
-function stats = update_statistics(stats, method_idx, f_offset, snr, ...
-    freq_error, snr_error, time)
-    % 更新统计信息
-    stats.freq_errors{method_idx}(end+1,:) = [f_offset, snr, freq_error];
-    stats.snr_errors{method_idx}(end+1,:) = [f_offset, snr, snr_error];
-    stats.times{method_idx}(end+1,:) = [f_offset, snr, time];
-end
-
-function print_statistics_summary(fid, stats, methods)
-    % 输出统计摘要
-    fprintf(fid, '\n性能统计摘要\n');
-    fprintf(fid, '===================\n\n');
-
-    for i = 1:length(methods)
-        fprintf(fid, '%s:\n', methods{i});
-
-        % 频率误差统计
-        freq_errs = stats.freq_errors{i}(:,3);
-        fprintf(fid, '频率误差统计:\n');
-        fprintf(fid, '  平均值: %.2f%%\n', mean(freq_errs));
-        fprintf(fid, '  中位数: %.2f%%\n', median(freq_errs));
-        fprintf(fid, '  最大值: %.2f%%\n', max(freq_errs));
-        fprintf(fid, '  最小值: %.2f%%\n', min(freq_errs));
-        fprintf(fid, '  标准差: %.2f%%\n\n', std(freq_errs));
-
-        % SNR误差统计
-        snr_errs = stats.snr_errors{i}(:,3);
-        fprintf(fid, 'SNR误差统计:\n');
-        fprintf(fid, '  平均值: %.2f dB\n', mean(snr_errs));
-        fprintf(fid, '  中位数: %.2f dB\n', median(snr_errs));
-        fprintf(fid, '  最大值: %.2f dB\n', max(snr_errs));
-        fprintf(fid, '  最小值: %.2f dB\n', min(snr_errs));
-        fprintf(fid, '  标准差: %.2f dB\n\n', std(snr_errs));
-
-        % 处理时间统计
-        times = stats.times{i}(:,3);
-        fprintf(fid, '处理时间统计:\n');
-        fprintf(fid, '  平均值: %.3f 秒\n', mean(times));
-        fprintf(fid, '  中位数: %.3f 秒\n', median(times));
-        fprintf(fid, '  最大值: %.3f 秒\n', max(times));
-        fprintf(fid, '  最小值: %.3f 秒\n\n', min(times));
-    end
-end
-
-function plot_sync_process(debug_info, f_offset, snr, t)
-    % 绘制同步过程
-    clf;
-
-    % 频率估计过程
-    subplot(3,1,1);
-    plot(t, debug_info.tracking_stage.freq_history);
-    hold on;
-    plot([t(1), t(end)], [f_offset, f_offset], 'r--');
-    title(sprintf('频率估计过程 (offset=%.1fHz, SNR=%.0fdB)', f_offset, snr));
-    xlabel('时间 (s)');
-    ylabel('频率 (Hz)');
-    legend('估计值', '实际值');
-    grid on;
-
-    % 相位估计过程
-    subplot(3,1,2);
-    plot(t, debug_info.tracking_stage.phase_history);
-    title('相位估计过程');
-    xlabel('时间 (s)');
-    ylabel('相位 (rad)');
-    grid on;
-
-    % 误差信号
-    subplot(3,1,3);
-    plot(t, debug_info.tracking_stage.error_signal);
-    title('误差信号');
-    xlabel('时间 (s)');
-    ylabel('误差');
-    grid on;
-
-    % 添加多级同步信息
-    annotation('textbox', [0.15, 0.95, 0.7, 0.05], ...
-        'String', sprintf('多级同步过程: 频率误差=%.2fHz, SNR=%.2fdB', ...
-        debug_info.tracking_stage.freq_error, snr), ...
-        'EdgeColor', 'none', 'HorizontalAlignment', 'center');
-
-    drawnow;
-    pause(0.1);
-end
-
-function plot_performance_comparison(stats, freq_offsets, methods)
-    % 创建性能对比图
-    figure('Name', '性能对比', 'Position', [100, 100, 1200, 800]);
-
-    % 频率误差vs频率偏移
-    subplot(2,2,1);
-    hold on;
-    for i = 1:length(methods)
-        data = stats.freq_errors{i};
-        for snr_val = unique(data(:,2))'
-            mask = data(:,2) == snr_val;
-            plot(data(mask,1), data(mask,3), 'o-', 'DisplayName', ...
-                sprintf('%s (SNR=%ddB)', methods{i}, snr_val));
+        % 频率误差 vs 频率偏移
+        subplot(3,2,1);
+        hold on;
+        for i = 1:length(methods)
+            data = stats.(methods{i}).freq_errors;
+            plot(data(:,1), data(:,3), 'o-', 'DisplayName', display_names{i});
         end
-    end
-    xlabel('频率偏移 (Hz)');
-    ylabel('频率误差 (%)');
-    title('频率估计性能');
-    grid on;
-    legend('show', 'Location', 'best');
+        xlabel('频率偏移 (Hz)');
+        ylabel('频率误差 (%)');
+        title('频率估计性能');
+        grid on;
+        legend('show', 'Location', 'best');
 
-    % SNR误差vs频率偏移
-    subplot(2,2,2);
-    hold on;
-    for i = 1:length(methods)
-        data = stats.snr_errors{i};
-        for snr_val = unique(data(:,2))'
-            mask = data(:,2) == snr_val;
-            plot(data(mask,1), data(mask,3), 'o-', 'DisplayName', ...
-                sprintf('%s (SNR=%ddB)', methods{i}, snr_val));
+        % SNR误差 vs 频率偏移
+        subplot(3,2,2);
+        hold on;
+        for i = 1:length(methods)
+            data = stats.(methods{i}).snr_errors;
+            plot(data(:,1), data(:,3), 'o-', 'DisplayName', display_names{i});
         end
-    end
-    xlabel('频率偏移 (Hz)');
-    ylabel('SNR误差 (dB)');
-    title('SNR估计性能');
-    grid on;
-    legend('show', 'Location', 'best');
+        xlabel('频率偏移 (Hz)');
+        ylabel('SNR误差 (dB)');
+        title('SNR估计性能');
+        grid on;
+        legend('show', 'Location', 'best');
 
-    % 处理时间vs频率偏移
-    subplot(2,2,3);
-    hold on;
-    for i = 1:length(methods)
-        data = stats.times{i};
-        plot(data(:,1), data(:,3), 'o-', 'DisplayName', methods{i});
-    end
-    xlabel('频率偏移 (Hz)');
-    ylabel('处理时间 (s)');
-    title('计算复杂度');
-    grid on;
-    legend('show', 'Location', 'best');
+        % 处理时间 vs 频率偏移
+        subplot(3,2,3);
+        hold on;
+        for i = 1:length(methods)
+            data = stats.(methods{i}).times;
+            plot(data(:,1), data(:,3), 'o-', 'DisplayName', display_names{i});
+        end
+        xlabel('频率偏移 (Hz)');
+        ylabel('处理时间 (s)');
+        title('计算复杂度');
+        grid on;
+        legend('show', 'Location', 'best');
 
-    % 箱线图比较
-    subplot(2,2,4);
-    % 重新组织数据用于箱线图
-    all_errors = cell(1, length(methods));
-    for i = 1:length(methods)
-        all_errors{i} = stats.freq_errors{i}(:,3);
+        % 频率误差箱线图
+        subplot(3,2,4);
+        all_freq_errors = [];
+        group_labels_freq = {};
+        for i = 1:length(methods)
+            current_data = stats.(methods{i}).freq_errors(:,3);
+            all_freq_errors = [all_freq_errors; current_data(:)];
+            group_labels_freq = [group_labels_freq; repmat(display_names(i), length(current_data), 1)];
+        end
+        boxplot(all_freq_errors, group_labels_freq, 'Labels', display_names);
+        ylabel('频率误差 (%)');
+        title('频率误差分布');
+        grid on;
+
+        % SNR误差箱线图
+        subplot(3,2,5);
+        all_snr_errors = [];
+        group_labels_snr = {};
+        for i = 1:length(methods)
+            current_data = stats.(methods{i}).snr_errors(:,3);
+            all_snr_errors = [all_snr_errors; current_data(:)];
+            group_labels_snr = [group_labels_snr; repmat(display_names(i), length(current_data), 1)];
+        end
+        boxplot(all_snr_errors, group_labels_snr, 'Labels', display_names);
+        ylabel('SNR误差 (dB)');
+        title('SNR误差分布');
+        grid on;
+
+        % 处理时间箱线图
+        subplot(3,2,6);
+        all_time_errors = [];
+        group_labels_time = {};
+        for i = 1:length(methods)
+            current_data = stats.(methods{i}).times(:,3);
+            all_time_errors = [all_time_errors; current_data(:)];
+            group_labels_time = [group_labels_time; repmat(display_names(i), length(current_data), 1)];
+        end
+        boxplot(all_time_errors, group_labels_time, 'Labels', display_names);
+        ylabel('处理时间 (s)');
+        title('处理时间分布');
+        grid on;
+
+        drawnow;
     end
-    boxplot(cell2mat(all_errors), 'Labels', methods);
-    ylabel('频率误差 (%)');
-    title('方法间性能对比');
-    grid on;
 end
 ```
 
 
 ## 测试结果
 
-### 同步测试结果
-
-```
-载波同步系统测试结果（第二版）
-===================
-
-测试条件:
-频率偏差: 0.5 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 0.50 Hz
-估计SNR: 24.32 dB
-频率误差精度: 0.00%
-处理时间: 0.002 秒
-
-原始Costas环法结果:
-估计频率误差: 0.52 Hz
-估计SNR: 3.47 dB
-频率误差精度: 3.72%
-处理时间: 0.007 秒
-
-改进Costas环法结果:
-估计频率误差: 0.46 Hz
-估计SNR: 0.00 dB
-频率误差精度: 7.63%
-处理时间: 0.075 秒
-
-多级同步法结果:
-估计频率误差: 0.46 Hz
-估计SNR: 0.00 dB
-频率误差精度: 7.63%
-处理时间: 0.310 秒
-
--------------------
-
-测试条件:
-频率偏差: 0.5 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 0.50 Hz
-估计SNR: 25.80 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 0.50 Hz
-估计SNR: 4.02 dB
-频率误差精度: 0.17%
-处理时间: 0.003 秒
-
-改进Costas环法结果:
-估计频率误差: 0.43 Hz
-估计SNR: 0.00 dB
-频率误差精度: 13.28%
-处理时间: 0.062 秒
-
-多级同步法结果:
-估计频率误差: 0.43 Hz
-估计SNR: 0.00 dB
-频率误差精度: 13.28%
-处理时间: 0.282 秒
-
--------------------
-
-测试条件:
-频率偏差: 0.5 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 0.50 Hz
-估计SNR: 25.98 dB
-频率误差精度: 0.00%
-处理时间: 0.002 秒
-
-原始Costas环法结果:
-估计频率误差: 0.51 Hz
-估计SNR: 4.09 dB
-频率误差精度: 1.07%
-处理时间: 0.002 秒
-
-改进Costas环法结果:
-估计频率误差: 0.38 Hz
-估计SNR: 0.00 dB
-频率误差精度: 23.25%
-处理时间: 0.066 秒
-
-多级同步法结果:
-估计频率误差: 0.38 Hz
-估计SNR: 0.00 dB
-频率误差精度: 23.25%
-处理时间: 0.263 秒
-
--------------------
-
-测试条件:
-频率偏差: 1.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 1.00 Hz
-估计SNR: 24.16 dB
-频率误差精度: 0.00%
-处理时间: 0.007 秒
-
-原始Costas环法结果:
-估计频率误差: 1.00 Hz
-估计SNR: 3.40 dB
-频率误差精度: 0.16%
-处理时间: 0.002 秒
-
-改进Costas环法结果:
-估计频率误差: 0.97 Hz
-估计SNR: 0.00 dB
-频率误差精度: 3.39%
-处理时间: 0.065 秒
-
-多级同步法结果:
-估计频率误差: 0.97 Hz
-估计SNR: 0.00 dB
-频率误差精度: 3.39%
-处理时间: 0.276 秒
-
--------------------
-
-测试条件:
-频率偏差: 1.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 1.00 Hz
-估计SNR: 25.81 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 1.00 Hz
-估计SNR: 4.05 dB
-频率误差精度: 0.45%
-处理时间: 0.006 秒
-
-改进Costas环法结果:
-估计频率误差: 0.91 Hz
-估计SNR: 0.00 dB
-频率误差精度: 9.00%
-处理时间: 0.060 秒
-
-多级同步法结果:
-估计频率误差: 0.91 Hz
-估计SNR: 0.00 dB
-频率误差精度: 9.00%
-处理时间: 0.273 秒
-
--------------------
-
-测试条件:
-频率偏差: 1.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 1.00 Hz
-估计SNR: 25.99 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 1.00 Hz
-估计SNR: 4.03 dB
-频率误差精度: 0.31%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 0.88 Hz
-估计SNR: 0.00 dB
-频率误差精度: 11.69%
-处理时间: 0.055 秒
-
-多级同步法结果:
-估计频率误差: 0.88 Hz
-估计SNR: 0.00 dB
-频率误差精度: 11.69%
-处理时间: 0.260 秒
-
--------------------
-
-测试条件:
-频率偏差: 2.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 2.00 Hz
-估计SNR: 24.21 dB
-频率误差精度: 0.00%
-处理时间: 0.000 秒
-
-原始Costas环法结果:
-估计频率误差: 1.95 Hz
-估计SNR: 3.42 dB
-频率误差精度: 2.42%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 1.95 Hz
-估计SNR: 0.00 dB
-频率误差精度: 2.34%
-处理时间: 0.058 秒
-
-多级同步法结果:
-估计频率误差: 1.95 Hz
-估计SNR: 0.00 dB
-频率误差精度: 2.34%
-处理时间: 0.259 秒
-
--------------------
-
-测试条件:
-频率偏差: 2.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 2.00 Hz
-估计SNR: 25.81 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 2.00 Hz
-估计SNR: 4.00 dB
-频率误差精度: 0.11%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 1.91 Hz
-估计SNR: 0.00 dB
-频率误差精度: 4.53%
-处理时间: 0.058 秒
-
-多级同步法结果:
-估计频率误差: 1.91 Hz
-估计SNR: 0.00 dB
-频率误差精度: 4.53%
-处理时间: 0.266 秒
-
--------------------
-
-测试条件:
-频率偏差: 2.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 2.00 Hz
-估计SNR: 26.00 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 2.00 Hz
-估计SNR: 4.13 dB
-频率误差精度: 0.22%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 1.83 Hz
-估计SNR: 0.00 dB
-频率误差精度: 8.29%
-处理时间: 0.063 秒
-
-多级同步法结果:
-估计频率误差: 1.83 Hz
-估计SNR: 0.00 dB
-频率误差精度: 8.29%
-处理时间: 0.261 秒
-
--------------------
-
-测试条件:
-频率偏差: 5.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 5.00 Hz
-估计SNR: 24.28 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 4.82 Hz
-估计SNR: 3.39 dB
-频率误差精度: 3.60%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 4.93 Hz
-估计SNR: 0.00 dB
-频率误差精度: 1.47%
-处理时间: 0.063 秒
-
-多级同步法结果:
-估计频率误差: 4.93 Hz
-估计SNR: 0.00 dB
-频率误差精度: 1.47%
-处理时间: 0.291 秒
-
--------------------
-
-测试条件:
-频率偏差: 5.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 5.00 Hz
-估计SNR: 25.82 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 4.99 Hz
-估计SNR: 4.09 dB
-频率误差精度: 0.16%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 4.91 Hz
-估计SNR: 0.00 dB
-频率误差精度: 1.87%
-处理时间: 0.050 秒
-
-多级同步法结果:
-估计频率误差: 4.91 Hz
-估计SNR: 0.00 dB
-频率误差精度: 1.87%
-处理时间: 0.260 秒
-
--------------------
-
-测试条件:
-频率偏差: 5.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 5.00 Hz
-估计SNR: 25.99 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 5.00 Hz
-估计SNR: 4.17 dB
-频率误差精度: 0.04%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 4.85 Hz
-估计SNR: 0.00 dB
-频率误差精度: 3.02%
-处理时间: 0.056 秒
-
-多级同步法结果:
-估计频率误差: 4.85 Hz
-估计SNR: 0.00 dB
-频率误差精度: 3.02%
-处理时间: 0.259 秒
-
--------------------
-
-测试条件:
-频率偏差: 10.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 24.41 dB
-频率误差精度: 0.00%
-处理时间: 0.000 秒
-
-原始Costas环法结果:
-估计频率误差: 8.19 Hz
-估计SNR: 3.13 dB
-频率误差精度: 18.06%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 8.86 Hz
-估计SNR: 0.00 dB
-频率误差精度: 11.44%
-处理时间: 0.063 秒
-
-多级同步法结果:
-估计频率误差: 8.86 Hz
-估计SNR: 0.00 dB
-频率误差精度: 11.44%
-处理时间: 0.259 秒
-
--------------------
-
-测试条件:
-频率偏差: 10.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 25.81 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 8.38 Hz
-估计SNR: 3.82 dB
-频率误差精度: 16.18%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 8.82 Hz
-估计SNR: 0.00 dB
-频率误差精度: 11.78%
-处理时间: 0.057 秒
-
-多级同步法结果:
-估计频率误差: 8.82 Hz
-估计SNR: 0.00 dB
-频率误差精度: 11.78%
-处理时间: 0.268 秒
-
--------------------
-
-测试条件:
-频率偏差: 10.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 25.99 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 8.40 Hz
-估计SNR: 3.91 dB
-频率误差精度: 16.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 8.78 Hz
-估计SNR: 0.00 dB
-频率误差精度: 12.25%
-处理时间: 0.059 秒
-
-多级同步法结果:
-估计频率误差: 8.78 Hz
-估计SNR: 0.00 dB
-频率误差精度: 12.25%
-处理时间: 0.267 秒
-
--------------------
-
-测试条件:
-频率偏差: 20.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 20.00 Hz
-估计SNR: 24.27 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -3.39 Hz
-估计SNR: 0.00 dB
-频率误差精度: 116.97%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 50.00%
-处理时间: 0.058 秒
-
-多级同步法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 50.00%
-处理时间: 0.277 秒
-
--------------------
-
-测试条件:
-频率偏差: 20.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 20.00 Hz
-估计SNR: 25.81 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -4.75 Hz
-估计SNR: 0.00 dB
-频率误差精度: 123.74%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 50.00%
-处理时间: 0.056 秒
-
-多级同步法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 50.00%
-处理时间: 0.263 秒
-
--------------------
-
-测试条件:
-频率偏差: 20.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 20.00 Hz
-估计SNR: 25.99 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -4.85 Hz
-估计SNR: 0.00 dB
-频率误差精度: 124.27%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 50.00%
-处理时间: 0.059 秒
-
-多级同步法结果:
-估计频率误差: 10.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 50.00%
-处理时间: 0.264 秒
-
--------------------
-
-测试条件:
-频率偏差: 30.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 30.00 Hz
-估计SNR: 24.24 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -2.55 Hz
-估计SNR: 0.00 dB
-频率误差精度: 108.51%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 9.95 Hz
-估计SNR: 0.00 dB
-频率误差精度: 66.82%
-处理时间: 0.057 秒
-
-多级同步法结果:
-估计频率误差: 9.95 Hz
-估计SNR: 0.00 dB
-频率误差精度: 66.82%
-处理时间: 0.263 秒
-
--------------------
-
-测试条件:
-频率偏差: 30.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 30.00 Hz
-估计SNR: 25.79 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -6.40 Hz
-估计SNR: 0.00 dB
-频率误差精度: 121.35%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 9.95 Hz
-估计SNR: 0.00 dB
-频率误差精度: 66.83%
-处理时间: 0.062 秒
-
-多级同步法结果:
-估计频率误差: 9.95 Hz
-估计SNR: 0.00 dB
-频率误差精度: 66.83%
-处理时间: 0.261 秒
-
--------------------
-
-测试条件:
-频率偏差: 30.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 30.00 Hz
-估计SNR: 25.99 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 9.93 Hz
-估计SNR: 0.00 dB
-频率误差精度: 66.89%
-处理时间: 0.060 秒
-
-多级同步法结果:
-估计频率误差: 9.93 Hz
-估计SNR: 0.00 dB
-频率误差精度: 66.89%
-处理时间: 0.266 秒
-
--------------------
-
-测试条件:
-频率偏差: 40.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 40.00 Hz
-估计SNR: 24.26 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -1.75 Hz
-估计SNR: 0.00 dB
-频率误差精度: 104.37%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 5.43 Hz
-估计SNR: 0.00 dB
-频率误差精度: 86.44%
-处理时间: 0.059 秒
-
-多级同步法结果:
-估计频率误差: 5.43 Hz
-估计SNR: 0.00 dB
-频率误差精度: 86.44%
-处理时间: 0.264 秒
-
--------------------
-
-测试条件:
-频率偏差: 40.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 40.00 Hz
-估计SNR: 25.82 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -0.30 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.74%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 6.72 Hz
-估计SNR: 0.00 dB
-频率误差精度: 83.19%
-处理时间: 0.063 秒
-
-多级同步法结果:
-估计频率误差: 6.72 Hz
-估计SNR: 0.00 dB
-频率误差精度: 83.19%
-处理时间: 0.256 秒
-
--------------------
-
-测试条件:
-频率偏差: 40.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 40.00 Hz
-估计SNR: 26.00 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 6.76 Hz
-估计SNR: 0.00 dB
-频率误差精度: 83.11%
-处理时间: 0.060 秒
-
-多级同步法结果:
-估计频率误差: 6.76 Hz
-估计SNR: 0.00 dB
-频率误差精度: 83.11%
-处理时间: 0.268 秒
-
--------------------
-
-测试条件:
-频率偏差: 50.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 50.00 Hz
-估计SNR: 24.31 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -1.81 Hz
-估计SNR: 0.00 dB
-频率误差精度: 103.62%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 0.41 Hz
-估计SNR: 0.00 dB
-频率误差精度: 99.18%
-处理时间: 0.057 秒
-
-多级同步法结果:
-估计频率误差: 0.41 Hz
-估计SNR: 0.00 dB
-频率误差精度: 99.18%
-处理时间: 0.260 秒
-
--------------------
-
-测试条件:
-频率偏差: 50.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 50.00 Hz
-估计SNR: 25.80 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 0.95 Hz
-估计SNR: 0.00 dB
-频率误差精度: 98.10%
-处理时间: 0.067 秒
-
-多级同步法结果:
-估计频率误差: 0.95 Hz
-估计SNR: 0.00 dB
-频率误差精度: 98.10%
-处理时间: 0.281 秒
-
--------------------
-
-测试条件:
-频率偏差: 50.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 50.00 Hz
-估计SNR: 25.99 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: 0.26 Hz
-估计SNR: 0.00 dB
-频率误差精度: 99.49%
-处理时间: 0.058 秒
-
-多级同步法结果:
-估计频率误差: 0.26 Hz
-估计SNR: 0.00 dB
-频率误差精度: 99.49%
-处理时间: 0.263 秒
-
--------------------
-
-测试条件:
-频率偏差: 60.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: 60.00 Hz
-估计SNR: 24.28 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -1.15 Hz
-估计SNR: 0.00 dB
-频率误差精度: 101.92%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -1.62 Hz
-估计SNR: 0.00 dB
-频率误差精度: 102.71%
-处理时间: 0.056 秒
-
-多级同步法结果:
-估计频率误差: -1.62 Hz
-估计SNR: 0.00 dB
-频率误差精度: 102.71%
-处理时间: 0.259 秒
-
--------------------
-
-测试条件:
-频率偏差: 60.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 60.00 Hz
-估计SNR: 25.80 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -1.43 Hz
-估计SNR: 0.00 dB
-频率误差精度: 102.39%
-处理时间: 0.060 秒
-
-多级同步法结果:
-估计频率误差: -1.43 Hz
-估计SNR: 0.00 dB
-频率误差精度: 102.39%
-处理时间: 0.263 秒
-
--------------------
-
-测试条件:
-频率偏差: 60.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 60.00 Hz
-估计SNR: 25.99 dB
-频率误差精度: 0.00%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -0.97 Hz
-估计SNR: 0.00 dB
-频率误差精度: 101.62%
-处理时间: 0.059 秒
-
-多级同步法结果:
-估计频率误差: -0.97 Hz
-估计SNR: 0.00 dB
-频率误差精度: 101.62%
-处理时间: 0.264 秒
-
--------------------
-
-测试条件:
-频率偏差: 70.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: -49.15 Hz
-估计SNR: -3.60 dB
-频率误差精度: 170.21%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -1.36 Hz
-估计SNR: 0.00 dB
-频率误差精度: 101.94%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -2.24 Hz
-估计SNR: 1.51 dB
-频率误差精度: 103.20%
-处理时间: 0.057 秒
-
-多级同步法结果:
-估计频率误差: -2.24 Hz
-估计SNR: 1.51 dB
-频率误差精度: 103.20%
-处理时间: 0.262 秒
-
--------------------
-
-测试条件:
-频率偏差: 70.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 57.80 Hz
-估计SNR: -10.12 dB
-频率误差精度: 17.43%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 99.99%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -3.05 Hz
-估计SNR: 1.27 dB
-频率误差精度: 104.36%
-处理时间: 0.055 秒
-
-多级同步法结果:
-估计频率误差: -3.05 Hz
-估计SNR: 1.27 dB
-频率误差精度: 104.36%
-处理时间: 0.269 秒
-
--------------------
-
-测试条件:
-频率偏差: 70.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: -21.80 Hz
-估计SNR: -19.76 dB
-频率误差精度: 131.14%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -3.47 Hz
-估计SNR: 2.50 dB
-频率误差精度: 104.96%
-处理时间: 0.062 秒
-
-多级同步法结果:
-估计频率误差: -3.47 Hz
-估计SNR: 2.50 dB
-频率误差精度: 104.96%
-处理时间: 0.263 秒
-
--------------------
-
-测试条件:
-频率偏差: 80.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: -40.40 Hz
-估计SNR: -4.15 dB
-频率误差精度: 150.50%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -2.50 Hz
-估计SNR: 0.00 dB
-频率误差精度: 103.12%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -2.16 Hz
-估计SNR: 7.56 dB
-频率误差精度: 102.70%
-处理时间: 0.061 秒
-
-多级同步法结果:
-估计频率误差: -2.16 Hz
-估计SNR: 7.56 dB
-频率误差精度: 102.70%
-处理时间: 0.255 秒
-
--------------------
-
-测试条件:
-频率偏差: 80.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: -27.35 Hz
-估计SNR: -10.41 dB
-频率误差精度: 134.19%
-处理时间: 0.000 秒
-
-原始Costas环法结果:
-估计频率误差: -0.14 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.17%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -3.72 Hz
-估计SNR: 8.62 dB
-频率误差精度: 104.66%
-处理时间: 0.056 秒
-
-多级同步法结果:
-估计频率误差: -3.72 Hz
-估计SNR: 8.62 dB
-频率误差精度: 104.66%
-处理时间: 0.260 秒
-
--------------------
-
-测试条件:
-频率偏差: 80.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: -38.70 Hz
-估计SNR: -21.42 dB
-频率误差精度: 148.38%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -3.84 Hz
-估计SNR: 8.70 dB
-频率误差精度: 104.80%
-处理时间: 0.062 秒
-
-多级同步法结果:
-估计频率误差: -3.84 Hz
-估计SNR: 8.70 dB
-频率误差精度: 104.80%
-处理时间: 0.283 秒
-
--------------------
-
-测试条件:
-频率偏差: 90.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: -10.65 Hz
-估计SNR: -2.58 dB
-频率误差精度: 111.83%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -3.69 Hz
-估计SNR: 0.00 dB
-频率误差精度: 104.10%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -2.48 Hz
-估计SNR: 10.90 dB
-频率误差精度: 102.75%
-处理时间: 0.060 秒
-
-多级同步法结果:
-估计频率误差: -2.48 Hz
-估计SNR: 10.90 dB
-频率误差精度: 102.75%
-处理时间: 0.260 秒
-
--------------------
-
-测试条件:
-频率偏差: 90.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: 54.50 Hz
-估计SNR: -12.38 dB
-频率误差精度: 39.44%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -4.92 Hz
-估计SNR: 0.00 dB
-频率误差精度: 105.46%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -3.42 Hz
-估计SNR: 11.80 dB
-频率误差精度: 103.80%
-处理时间: 0.055 秒
-
-多级同步法结果:
-估计频率误差: -3.42 Hz
-估计SNR: 11.80 dB
-频率误差精度: 103.80%
-处理时间: 0.258 秒
-
--------------------
-
-测试条件:
-频率偏差: 90.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: -56.30 Hz
-估计SNR: -22.49 dB
-频率误差精度: 162.56%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -4.98 Hz
-估计SNR: 0.00 dB
-频率误差精度: 105.53%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -4.10 Hz
-估计SNR: 12.04 dB
-频率误差精度: 104.55%
-处理时间: 0.066 秒
-
-多级同步法结果:
-估计频率误差: -4.10 Hz
-估计SNR: 12.04 dB
-频率误差精度: 104.55%
-处理时间: 0.262 秒
-
--------------------
-
-测试条件:
-频率偏差: 100.0 Hz
-SNR: 10 dB
-
-平方变换法结果:
-估计频率误差: -10.10 Hz
-估计SNR: -2.23 dB
-频率误差精度: 110.10%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: -0.47 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.47%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -2.53 Hz
-估计SNR: 11.48 dB
-频率误差精度: 102.53%
-处理时间: 0.058 秒
-
-多级同步法结果:
-估计频率误差: -2.53 Hz
-估计SNR: 11.48 dB
-频率误差精度: 102.53%
-处理时间: 0.268 秒
-
--------------------
-
-测试条件:
-频率偏差: 100.0 Hz
-SNR: 20 dB
-
-平方变换法结果:
-估计频率误差: -37.85 Hz
-估计SNR: -13.01 dB
-频率误差精度: 137.85%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -2.10 Hz
-估计SNR: 12.25 dB
-频率误差精度: 102.10%
-处理时间: 0.057 秒
-
-多级同步法结果:
-估计频率误差: -2.10 Hz
-估计SNR: 12.25 dB
-频率误差精度: 102.10%
-处理时间: 0.266 秒
-
--------------------
-
-测试条件:
-频率偏差: 100.0 Hz
-SNR: 30 dB
-
-平方变换法结果:
-估计频率误差: 51.70 Hz
-估计SNR: -22.03 dB
-频率误差精度: 48.30%
-处理时间: 0.001 秒
-
-原始Costas环法结果:
-估计频率误差: 0.00 Hz
-估计SNR: 0.00 dB
-频率误差精度: 100.00%
-处理时间: 0.001 秒
-
-改进Costas环法结果:
-估计频率误差: -2.05 Hz
-估计SNR: 12.33 dB
-频率误差精度: 102.05%
-处理时间: 0.059 秒
-
-多级同步法结果:
-估计频率误差: -2.05 Hz
-估计SNR: 12.33 dB
-频率误差精度: 102.05%
-处理时间: 0.279 秒
-
--------------------
-
-
-性能统计摘要
-===================
-
-平方变换法:
-频率误差统计:
-  平均值: 32.43%
-  中位数: 0.00%
-  最大值: 170.21%
-  最小值: 0.00%
-  标准差: 58.21%
-
-SNR误差统计:
-  平均值: 14.88 dB
-  中位数: 12.40 dB
-  最大值: 52.49 dB
-  最小值: 4.00 dB
-  标准差: 14.38 dB
-
-处理时间统计:
-  平均值: 0.001 秒
-  中位数: 0.001 秒
-  最大值: 0.007 秒
-  最小值: 0.000 秒
-
-原始Costas环法:
-频率误差统计:
-  平均值: 68.78%
-  中位数: 100.00%
-  最大值: 124.27%
-  最小值: 0.04%
-  标准差: 49.27%
-
-SNR误差统计:
-  平均值: 18.64 dB
-  中位数: 20.00 dB
-  最大值: 30.00 dB
-  最小值: 6.53 dB
-  标准差: 8.37 dB
-
-处理时间统计:
-  平均值: 0.001 秒
-  中位数: 0.001 秒
-  最大值: 0.007 秒
-  最小值: 0.001 秒
-
-改进Costas环法:
-频率误差统计:
-  平均值: 61.30%
-  中位数: 75.00%
-  最大值: 104.96%
-  最小值: 1.47%
-  标准差: 42.86%
-
-SNR误差统计:
-  平均值: 17.71 dB
-  中位数: 20.00 dB
-  最大值: 30.00 dB
-  最小值: 0.90 dB
-  标准差: 9.05 dB
-
-处理时间统计:
-  平均值: 0.060 秒
-  中位数: 0.059 秒
-  最大值: 0.075 秒
-  最小值: 0.050 秒
-
-多级同步法:
-频率误差统计:
-  平均值: 61.30%
-  中位数: 75.00%
-  最大值: 104.96%
-  最小值: 1.47%
-  标准差: 42.86%
-
-SNR误差统计:
-  平均值: 17.71 dB
-  中位数: 20.00 dB
-  最大值: 30.00 dB
-  最小值: 0.90 dB
-  标准差: 9.05 dB
-
-处理时间统计:
-  平均值: 0.267 秒
-  中位数: 0.263 秒
-  最大值: 0.310 秒
-  最小值: 0.255 秒
-
-```
+> 注意：测试结果文件不存在
 
 ### 性能测试图表
 
