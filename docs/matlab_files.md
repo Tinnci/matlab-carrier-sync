@@ -27,8 +27,10 @@ Volume serial number is .
 ├───.gitignore
 ├───concat_matlab_files.ps1
 ├───main.m
+├───optimization_results.csv
 ├───README.md
 ├───run_matlab_script.ps1
+├───sync_results.csv
 ```
 
 ### 目录列表
@@ -111,6 +113,9 @@ function best_params = optimize_costas_params()
     damping_range = [0.4, 0.5, 0.6, 0.707, 1.0];  % 包含更低的阻尼系数
     freq_max_range = [10, 25, 50, 100, 150];  % 扩展到150Hz
 
+    % 调制方式
+    modulation_types = {'BPSK', 'QPSK'};
+
     % 使用 ndgrid 生成所有组合
     [A, B, C] = ndgrid(noise_bw_range, damping_range, freq_max_range);
     param_combinations = [A(:), B(:), C(:)];
@@ -135,37 +140,55 @@ function best_params = optimize_costas_params()
         freq_max = param_combinations(idx, 3);
 
         % 当前参数组合的性能统计
-        freq_errors = zeros(1, length(freq_offsets) * length(snrs) * monte_carlo_runs);
-        snr_errors = zeros(1, length(freq_offsets) * length(snrs) * monte_carlo_runs);
+        total_tests = length(modulation_types) * length(freq_offsets) * length(snrs) * monte_carlo_runs;
+        freq_errors = zeros(1, total_tests);
+        snr_errors = zeros(1, total_tests);
         error_idx = 1;
 
-        % 对每种测试条件进行多次Monte Carlo测试
-        for f_offset = freq_offsets
-            for snr = snrs
-                for run = 1:monte_carlo_runs
-                    % 生成预先的信号模板
-                    t = 0:1/fs:signal_length;
-                    modulated_signal = cos(2*pi*(f_carrier + f_offset)*t);
-                    
-                    % 使用不同的随机种子确保每次运行的随机性
-                    rng(run);  
-                    noisy_signal = awgn(modulated_signal, snr, 'measured');
+        % 对每种调制方式进行测试
+        for mod_idx = 1:length(modulation_types)
+            modulation_type = modulation_types{mod_idx};
 
-                    % 使用当前参数进行同步测试
-                    [freq_error, snr_est] = test_costas_params(noisy_signal, fs, f_carrier, ...
-                        noise_bw, damping, freq_max);
+            % 对每种测试条件进行多次Monte Carlo测试
+            for f_offset = freq_offsets
+                for snr = snrs
+                    for run = 1:monte_carlo_runs
+                        % 生成预先的信号模板
+                        t = 0:1/fs:signal_length;
+                        % 初始化 modulated_signal 以避免未初始化警告
+                        modulated_signal = zeros(1, length(t));
 
-                    % 计算误差
-                    if f_offset ~=0
-                        freq_err_percent = abs((freq_error - f_offset)/f_offset) * 100;
-                    else
-                        freq_err_percent = 0;
+                        switch modulation_type
+                            case 'BPSK'
+                                data = randi([0 1], 1, length(t));
+                                bpsk_signal = 2*data - 1;
+                                modulated_signal = bpsk_signal .* cos(2*pi*(f_carrier + f_offset)*t);
+                            case 'QPSK'
+                                data_I = 2*randi([0 1],1,length(t)) -1;  % I分量：-1 或 +1
+                                data_Q = 2*randi([0 1],1,length(t)) -1;  % Q分量：-1 或 +1
+                                modulated_signal = data_I .* cos(2*pi*(f_carrier + f_offset)*t) + ...
+                                                   data_Q .* sin(2*pi*(f_carrier + f_offset)*t);
+                            otherwise
+                                error('Unsupported modulation type: %s', modulation_type);
+                        end
+                        noisy_signal = awgn(modulated_signal, snr, 'measured');
+
+                        % 使用当前参数进行同步测试
+                        [freq_error, snr_est] = test_costas_params(noisy_signal, fs, f_carrier, ...
+                            noise_bw, damping, freq_max, modulation_type);
+
+                        % 计算误差
+                        if f_offset ~=0
+                            freq_err_percent = abs((freq_error - f_offset)/f_offset) * 100;
+                        else
+                            freq_err_percent = 0;
+                        end
+                        snr_err_db = abs(snr_est - snr);
+
+                        freq_errors(error_idx) = freq_err_percent;
+                        snr_errors(error_idx) = snr_err_db;
+                        error_idx = error_idx + 1;
                     end
-                    snr_err_db = abs(snr_est - snr);
-
-                    freq_errors(error_idx) = freq_err_percent;
-                    snr_errors(error_idx) = snr_err_db;
-                    error_idx = error_idx + 1;
                 end
             end
         end
@@ -219,7 +242,7 @@ function best_params = optimize_costas_params()
     fprintf('优化完成，结果已保存到 optimization_results.csv\n');
 end
 
-function [freq_error, snr_estimate] = test_costas_params(signal, fs, f_carrier, noise_bw, damping, freq_max)
+function [freq_error, snr_estimate] = test_costas_params(signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type)
     % 用于测试特定参数组合的Costas环性能
 
     % 频率限幅设置
@@ -268,11 +291,27 @@ function [freq_error, snr_estimate] = test_costas_params(signal, fs, f_carrier, 
     avg_freq_radians = mean(freq_history(steady_state_start:end));
     freq_error = avg_freq_radians * fs / (2 * pi);
 
-    % 计算SNR估计
-    I_steady = I_arm(steady_state_start:end);
-    Q_steady = Q_arm(steady_state_start:end);
-    signal_power = mean(I_steady.^2);
-    noise_power = mean(Q_steady.^2);
+    % 使用同步后的频率进行解调以计算 SNR
+    synchronized_freq = f_carrier + freq_error;
+    t_sync = (steady_state_start:N)/fs;  % 修正为 (steady_state_start:N)/fs
+    I_steady = signal(steady_state_start:end) .* cos(2*pi*synchronized_freq*t_sync);
+    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*synchronized_freq*t_sync);
+
+    % 计算信号功率和噪声功率
+    if strcmp(modulation_type, 'BPSK')
+        % 对于 BPSK，Q 分支主要包含噪声
+        signal_power = mean(I_steady.^2);
+        noise_power = mean(Q_steady.^2);
+    elseif strcmp(modulation_type, 'QPSK')
+        % 对于 QPSK，I 和 Q 分支都包含信号
+        signal_power = mean(I_steady.^2 + Q_steady.^2) / 2;
+        % 估计噪声功率（使用均值残差）
+        noise_power = mean((I_steady - mean(I_steady)).^2 + (Q_steady - mean(Q_steady)).^2) / 2;
+    else
+        error('Unsupported modulation type: %s', modulation_type);
+    end
+
+    % 计算SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
     snr_estimate = min(max(snr_estimate, 0), 40);
 end
@@ -301,7 +340,7 @@ end
 
 ```matlab
 % costas_loop_sync.m
-function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier, noise_bw, damping, freq_max)
+function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type)
     % Costas环法实现载波同步
     % 输入参数:
     %   signal: 输入信号
@@ -310,6 +349,7 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier, no
     %   noise_bw: 噪声带宽
     %   damping: 阻尼系数
     %   freq_max: 最大频率偏移 (Hz)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
@@ -358,29 +398,34 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier, no
         freq_history(n) = freq;
     end
 
-    % 计算频率误差（使用稳态频率）
-    steady_state_start = floor(N * 0.7);  % 使用后30%的数据
+    % 计算频率误差
+    steady_state_start = floor(N * 0.7);
     avg_freq_radians = mean(freq_history(steady_state_start:end));
-
-    % 转换为Hz
     freq_error = avg_freq_radians * fs / (2 * pi);
 
-    % 改进的SNR估计
-    % 使用稳态I/Q信号的功率比
-    I_steady = I_arm(steady_state_start:end);
-    Q_steady = Q_arm(steady_state_start:end);
+    % 使用同步后的频率进行解调以计算 SNR
+    synchronized_freq = f_carrier + freq_error;
+    t_sync = (steady_state_start:N)/fs;  % 修正为 (steady_state_start:N)/fs
+    I_steady = signal(steady_state_start:end) .* cos(2*pi*synchronized_freq*t_sync);
+    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*synchronized_freq*t_sync);
 
-    % 计算信号功率（I路主要包含信号）
-    signal_power = mean(I_steady.^2);
+    % 计算信号功率和噪声功率
+    if strcmp(modulation_type, 'BPSK')
+        % 对于 BPSK，Q 分支主要包含噪声
+        signal_power = mean(I_steady.^2);
+        noise_power = mean(Q_steady.^2);
+    elseif strcmp(modulation_type, 'QPSK')
+        % 对于 QPSK，I 和 Q 分支都包含信号
+        signal_power = mean(I_steady.^2 + Q_steady.^2) / 2;
+        % 估计噪声功率（使用均值残差）
+        noise_power = mean((I_steady - mean(I_steady)).^2 + (Q_steady - mean(Q_steady)).^2) / 2;
+    else
+        error('Unsupported modulation type: %s', modulation_type);
+    end
 
-    % 计算噪声功率（Q路主要包含噪声）
-    noise_power = mean(Q_steady.^2);
-
-    % 计算SNR
+    % 计算 SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
-
-    % 限制SNR估计的范围，避免不合理的值
-    snr_estimate = min(max(snr_estimate, 0), 40);
+    snr_estimate = min(max(snr_estimate, 0), 40);  % 限制范围
 end
 ```
 
@@ -389,7 +434,7 @@ end
 
 ```matlab
 % improved_costas_sync.m
-function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, fs, f_carrier, noise_bw, damping, freq_max)
+function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type)
     % 改进的Costas环载波同步
     % 输入参数:
     %   signal: 输入信号
@@ -398,6 +443,7 @@ function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, f
     %   noise_bw: 噪声带宽
     %   damping: 阻尼系数
     %   freq_max: 最大频率偏移 (Hz)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
@@ -450,14 +496,14 @@ function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, f
     end
 
     % 使用稳态数据计算最终结果
-    [freq_error, snr_estimate] = calculate_final_estimates_tracked(freq_history, I_arm, Q_arm, fs, f_carrier);
+    [freq_error, snr_estimate] = calculate_final_estimates_tracked(freq_history, I_arm, Q_arm, fs, f_carrier, modulation_type);
 
     % 收集调试信息，并添加 freq_error 字段
     debug_info = struct(...
         'freq_history', freq_history * fs / (2 * pi), ...
         'phase_history', phase_history, ...
         'error_signal', error, ...
-        'freq_error', freq_error);  % 添加 freq_error 字段
+        'freq_error', freq_error);
 end
 
 function error = improved_phase_detector(I, Q)
@@ -470,7 +516,7 @@ function error = improved_phase_detector(I, Q)
     error = error .* confidence;
 end
 
-function [freq_error, snr_estimate] = calculate_final_estimates_tracked(freq_history, I_arm, Q_arm, fs, f_carrier)
+function [freq_error, snr_estimate] = calculate_final_estimates_tracked(freq_history, I_arm, Q_arm, fs, f_carrier, modulation_type)
     % 计算最终估计值
     N = length(freq_history);
     steady_state_start = floor(N * 0.6);  % 使用后40%的数据
@@ -520,7 +566,7 @@ end
 
 ```matlab
 % multi_stage_costas_sync.m
-function [freq_error, snr_estimate, debug_info] = multi_stage_costas_sync(signal, fs, f_carrier, noise_bw, damping, freq_max)
+function [freq_error, snr_estimate, debug_info] = multi_stage_costas_sync(signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type)
     % 多级Costas环同步器
     % 输入参数:
     %   signal: 输入信号
@@ -529,20 +575,21 @@ function [freq_error, snr_estimate, debug_info] = multi_stage_costas_sync(signal
     %   noise_bw: 噪声带宽 (优化后的)
     %   damping: 阻尼系数 (优化后的)
     %   freq_max: 最大频率偏移 (Hz) (优化后的)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
     %   debug_info: 调试信息结构体
 
     % 第一级：FFT粗搜索
-    [coarse_freq_error, initial_snr] = wide_range_fft_search(signal, fs, f_carrier, 2^nextpow2(length(signal)), 200);  % 扩展到±200Hz
+    [coarse_freq_error, initial_snr] = wide_range_fft_search(signal, fs, f_carrier, 2^nextpow2(length(signal)), 200);
 
     % 第二级：分段精细搜索
-    [refined_freq_error, refined_snr] = fine_grid_search(signal, fs, f_carrier, coarse_freq_error, 50);  % 扩展到±50Hz
+    [refined_freq_error, refined_snr] = fine_grid_search(signal, fs, f_carrier, coarse_freq_error, 50);
 
     % 第三级：改进的Costas环精确跟踪（使用优化后的参数）
     [final_freq_error, final_snr, tracking_info] = improved_costas_sync(...
-        signal, fs, f_carrier, noise_bw, damping, freq_max);  % 使用优化后的参数
+        signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type);
 
     % 返回最终结果
     freq_error = final_freq_error;
@@ -627,6 +674,9 @@ function [freq_error, snr] = fine_grid_search(signal, fs, f_carrier, coarse_erro
         % 分段处理
         for seg = 1:num_segments
             idx = (seg-1)*segment_length + (1:segment_length);
+            if max(idx) > length(signal)
+                break;
+            end
             t = (idx-1)/fs;
             test_signal = exp(-1j*2*pi*f_test*t);
             segment_correlation = abs(sum(signal(idx).*test_signal));
@@ -657,7 +707,7 @@ end
 
 ```matlab
 % particle_filter_sync.m
-function [freq_error, snr_estimate, debug_info] = particle_filter_sync(signal, fs, f_carrier, num_particles, freq_max)
+function [freq_error, snr_estimate, debug_info] = particle_filter_sync(signal, fs, f_carrier, num_particles, freq_max, modulation_type)
     % 基于粒子滤波器的载波同步
     % 输入参数:
     %   signal: 输入信号
@@ -665,6 +715,7 @@ function [freq_error, snr_estimate, debug_info] = particle_filter_sync(signal, f
     %   f_carrier: 载波频率 (Hz)
     %   num_particles: 粒子数量
     %   freq_max: 最大频率偏移 (Hz)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
@@ -679,21 +730,29 @@ function [freq_error, snr_estimate, debug_info] = particle_filter_sync(signal, f
     freq_history = zeros(1, N);
 
     for n = 1:N
-        % 生成本地载波
+        % 当前采样时间
         t = (n-1)/fs;
+        
+        % 生成本地载波
         I_carrier = cos(2 * pi * particles * t);
         Q_carrier = -sin(2 * pi * particles * t);
 
         % I/Q解调
-        I_arm = signal(n) * I_carrier;
-        Q_arm = signal(n) * Q_carrier;
+        I_arm = signal(n) .* I_carrier;
+        Q_arm = signal(n) .* Q_carrier;
 
-        % 计算观测
+        % 计算观测（相位）
         obs = atan2(Q_arm, I_arm);
 
-        % 计算权重
-        weights = weights .* exp(-(obs).^2 / (2*(0.1)^2));
+        % 计算权重（假设相位噪声为高斯分布）
+        sigma = 0.1;  % 相位噪声标准差
+        weights = weights .* exp(- (obs).^2 / (2 * sigma^2));
         weights = weights / sum(weights);
+
+        % 检查权重归一化
+        if any(isnan(weights)) || any(weights < 0)
+            weights = ones(1, num_particles) / num_particles;
+        end
 
         % 重采样
         indices = resample_particles(weights);
@@ -709,13 +768,29 @@ function [freq_error, snr_estimate, debug_info] = particle_filter_sync(signal, f
     avg_freq = mean(freq_history(steady_state_start:end));
     freq_error = avg_freq - f_carrier;
 
-    % 计算SNR估计
-    I_steady = signal(steady_state_start:end) .* cos(2*pi*f_carrier*(steady_state_start:N)/fs);
-    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*f_carrier*(steady_state_start:N)/fs);
-    signal_power = mean(I_steady.^2);
-    noise_power = mean(Q_steady.^2);
+    % 使用同步后的频率进行解调以计算 SNR
+    synchronized_freq = f_carrier + freq_error;
+    t_sync = (steady_state_start:N)/fs;  % 修正为 (steady_state_start:N)/fs
+    I_steady = signal(steady_state_start:end) .* cos(2*pi*synchronized_freq*t_sync);
+    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*synchronized_freq*t_sync);
+
+    % 计算信号功率和噪声功率
+    if strcmp(modulation_type, 'BPSK')
+        % 对于 BPSK，Q 分支主要包含噪声
+        signal_power = mean(I_steady.^2);
+        noise_power = mean(Q_steady.^2);
+    elseif strcmp(modulation_type, 'QPSK')
+        % 对于 QPSK，I 和 Q 分支都包含信号
+        signal_power = mean(I_steady.^2 + Q_steady.^2) / 2;
+        % 估计噪声功率（使用均值残差）
+        noise_power = mean((I_steady - mean(I_steady)).^2 + (Q_steady - mean(Q_steady)).^2) / 2;
+    else
+        error('Unsupported modulation type: %s', modulation_type);
+    end
+
+    % 计算 SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
-    snr_estimate = min(max(snr_estimate, 0), 40);
+    snr_estimate = min(max(snr_estimate, 0), 40);  % 限制范围
 
     % 收集调试信息
     debug_info = struct(...
@@ -744,7 +819,7 @@ end
 
 ```matlab
 % pll_sync.m
-function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier, loop_bw, damping, freq_max)
+function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier, loop_bw, damping, freq_max, modulation_type)
     % 基于锁相环（PLL）的载波同步
     % 输入参数:
     %   signal: 输入信号
@@ -753,6 +828,7 @@ function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier
     %   loop_bw: 环路带宽
     %   damping: 阻尼系数
     %   freq_max: 最大频率偏移 (Hz)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
@@ -800,13 +876,29 @@ function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier
     avg_freq = mean(freq_history(steady_state_start:end));
     freq_error = avg_freq;
 
-    % 计算SNR估计
-    I_steady = I_arm(steady_state_start:end);
-    Q_steady = Q_arm(steady_state_start:end);
-    signal_power = mean(I_steady.^2);
-    noise_power = mean(Q_steady.^2);
+    % 使用同步后的频率进行解调以计算 SNR
+    synchronized_freq = f_carrier + freq_error;
+    t_sync = (steady_state_start:N)/fs;  % 修正为 (steady_state_start:N)/fs
+    I_steady = signal(steady_state_start:end) .* cos(2*pi*synchronized_freq*t_sync);
+    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*synchronized_freq*t_sync);
+
+    % 计算信号功率和噪声功率
+    if strcmp(modulation_type, 'BPSK')
+        % 对于 BPSK，Q 分支主要包含噪声
+        signal_power = mean(I_steady.^2);
+        noise_power = mean(Q_steady.^2);
+    elseif strcmp(modulation_type, 'QPSK')
+        % 对于 QPSK，I 和 Q 分支都包含信号
+        signal_power = mean(I_steady.^2 + Q_steady.^2) / 2;
+        % 估计噪声功率（使用均值残差）
+        noise_power = mean((I_steady - mean(I_steady)).^2 + (Q_steady - mean(Q_steady)).^2) / 2;
+    else
+        error('Unsupported modulation type: %s', modulation_type);
+    end
+
+    % 计算 SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
-    snr_estimate = min(max(snr_estimate, 0), 40);
+    snr_estimate = min(max(snr_estimate, 0), 40);  % 限制范围
 
     % 收集调试信息
     debug_info = struct(...
@@ -837,12 +929,13 @@ end
 
 ```matlab
 % square_law_sync.m
-function [freq_error, snr_estimate] = square_law_sync(signal, fs, f_carrier)
+function [freq_error, snr_estimate] = square_law_sync(signal, fs, f_carrier, modulation_type)
     % 平方变换法实现载波同步
     % 输入参数:
     %   signal: 输入信号
-    %   fs: 采样频率
-    %   f_carrier: 载波频率
+    %   fs: 采样频率 (Hz)
+    %   f_carrier: 载波频率 (Hz)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
@@ -852,17 +945,18 @@ function [freq_error, snr_estimate] = square_law_sync(signal, fs, f_carrier)
 
     % FFT分析
     N = length(squared_signal);
-    fft_result = fft(squared_signal, 2^nextpow2(N));
+    fft_size = 2^nextpow2(N);
+    fft_result = fft(squared_signal, fft_size);
     fft_result = fftshift(fft_result);
     magnitude = abs(fft_result);
-    freq = (-length(fft_result)/2:length(fft_result)/2-1) * (fs / length(fft_result));
+    freq = (-fft_size/2:fft_size/2-1) * (fs / fft_size);
 
     % 寻找二倍频成分的峰值
     expected_freq = 2 * f_carrier;  % 二倍载波频率
     [~, center_idx] = min(abs(freq - expected_freq));  % 找到接近二倍频的频谱点
-    search_width = floor(length(fft_result) / 16);  % 搜索范围宽度
+    search_width = floor(fft_size / 16);  % 搜索范围宽度
     search_start = max(1, center_idx - search_width);
-    search_end = min(length(fft_result), center_idx + search_width);
+    search_end = min(length(freq), center_idx + search_width);
     search_range = search_start:search_end;
 
     [peak_value, local_peak_idx] = max(magnitude(search_range));
@@ -872,15 +966,25 @@ function [freq_error, snr_estimate] = square_law_sync(signal, fs, f_carrier)
     % 计算频率误差（考虑二倍频的影响）
     freq_error = (peak_freq / 2) - f_carrier;
 
-    % 改进的SNR估计
-    % 使用峰值周围的平均功率作为信号功率
-    signal_range = max(1, peak_idx - 2):min(length(freq), peak_idx + 2);
-    signal_power = mean(magnitude(signal_range).^2);
+    % 使用同步后的频率进行解调以计算 SNR
+    synchronized_freq = f_carrier + freq_error;
+    t_sync = (0:length(signal)-1)/fs;
+    I_sync = signal .* cos(2*pi*synchronized_freq*t_sync);
+    Q_sync = signal .* -sin(2*pi*synchronized_freq*t_sync);
 
-    % 排除峰值附近区域计算噪声功率
-    noise_magnitude = magnitude;
-    noise_magnitude(signal_range) = [];
-    noise_power = mean(noise_magnitude.^2);
+    % 计算信号功率和噪声功率
+    if strcmp(modulation_type, 'BPSK')
+        % 对于 BPSK，Q 分支主要包含噪声
+        signal_power = mean(I_sync.^2);
+        noise_power = mean(Q_sync.^2);
+    elseif strcmp(modulation_type, 'QPSK')
+        % 对于 QPSK，I 和 Q 分支都包含信号
+        signal_power = mean(I_sync.^2 + Q_sync.^2) / 2;
+        % 估计噪声功率（使用均值残差）
+        noise_power = mean((I_sync - mean(I_sync)).^2 + (Q_sync - mean(Q_sync)).^2) / 2;
+    else
+        error('Unsupported modulation type: %s', modulation_type);
+    end
 
     % 计算SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
@@ -960,35 +1064,35 @@ function test_sync_methods()
                 % 测试各种方法
                 % 1. 平方律法
                 tic;
-                [freq_error1, snr_est1] = square_law_sync(noisy_signal, fs, f_carrier);
+                [freq_error1, snr_est1] = square_law_sync(noisy_signal, fs, f_carrier, current_mod);
                 time1 = toc;
 
                 % 2. 原始Costas环法（使用优化后的参数）
                 tic;
                 [freq_error2, snr_est2] = costas_loop_sync(noisy_signal, fs, f_carrier, ...
-                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                    best_params.noise_bw, best_params.damping, best_params.freq_max, current_mod);
                 time2 = toc;
 
                 % 3. 改进Costas环法（使用优化后的参数）
                 tic;
                 [freq_error3, snr_est3, ~] = improved_costas_sync(noisy_signal, fs, f_carrier, ...
-                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                    best_params.noise_bw, best_params.damping, best_params.freq_max, current_mod);
                 time3 = toc;
 
                 % 4. 多级同步法（使用优化后的参数）
                 tic;
                 [freq_error4, snr_est4, ~] = multi_stage_costas_sync(noisy_signal, fs, f_carrier, ...
-                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                    best_params.noise_bw, best_params.damping, best_params.freq_max, current_mod);
                 time4 = toc;
 
                 % 5. PLL同步法
                 tic;
-                [freq_error5, snr_est5, ~] = pll_sync(noisy_signal, fs, f_carrier, 1, 0.707, best_params.freq_max);
+                [freq_error5, snr_est5, ~] = pll_sync(noisy_signal, fs, f_carrier, 1, 0.707, best_params.freq_max, current_mod);
                 time5 = toc;
 
                 % 6. 粒子滤波器同步法
                 tic;
-                [freq_error6, snr_est6, ~] = particle_filter_sync(noisy_signal, fs, f_carrier, 100, best_params.freq_max);
+                [freq_error6, snr_est6, ~] = particle_filter_sync(noisy_signal, fs, f_carrier, 100, best_params.freq_max, current_mod);
                 time6 = toc;
 
                 % 计算频率误差精度

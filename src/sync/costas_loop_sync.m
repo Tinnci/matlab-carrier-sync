@@ -1,5 +1,5 @@
 % costas_loop_sync.m
-function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier, noise_bw, damping, freq_max)
+function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type)
     % Costas环法实现载波同步
     % 输入参数:
     %   signal: 输入信号
@@ -8,6 +8,7 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier, no
     %   noise_bw: 噪声带宽
     %   damping: 阻尼系数
     %   freq_max: 最大频率偏移 (Hz)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
@@ -56,27 +57,32 @@ function [freq_error, snr_estimate] = costas_loop_sync(signal, fs, f_carrier, no
         freq_history(n) = freq;
     end
 
-    % 计算频率误差（使用稳态频率）
-    steady_state_start = floor(N * 0.7);  % 使用后30%的数据
+    % 计算频率误差
+    steady_state_start = floor(N * 0.7);
     avg_freq_radians = mean(freq_history(steady_state_start:end));
-
-    % 转换为Hz
     freq_error = avg_freq_radians * fs / (2 * pi);
 
-    % 改进的SNR估计
-    % 使用稳态I/Q信号的功率比
-    I_steady = I_arm(steady_state_start:end);
-    Q_steady = Q_arm(steady_state_start:end);
+    % 使用同步后的频率进行解调以计算 SNR
+    synchronized_freq = f_carrier + freq_error;
+    t_sync = (steady_state_start:N)/fs;  % 修正为 (steady_state_start:N)/fs
+    I_steady = signal(steady_state_start:end) .* cos(2*pi*synchronized_freq*t_sync);
+    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*synchronized_freq*t_sync);
 
-    % 计算信号功率（I路主要包含信号）
-    signal_power = mean(I_steady.^2);
+    % 计算信号功率和噪声功率
+    if strcmp(modulation_type, 'BPSK')
+        % 对于 BPSK，Q 分支主要包含噪声
+        signal_power = mean(I_steady.^2);
+        noise_power = mean(Q_steady.^2);
+    elseif strcmp(modulation_type, 'QPSK')
+        % 对于 QPSK，I 和 Q 分支都包含信号
+        signal_power = mean(I_steady.^2 + Q_steady.^2) / 2;
+        % 估计噪声功率（使用均值残差）
+        noise_power = mean((I_steady - mean(I_steady)).^2 + (Q_steady - mean(Q_steady)).^2) / 2;
+    else
+        error('Unsupported modulation type: %s', modulation_type);
+    end
 
-    % 计算噪声功率（Q路主要包含噪声）
-    noise_power = mean(Q_steady.^2);
-
-    % 计算SNR
+    % 计算 SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
-
-    % 限制SNR估计的范围，避免不合理的值
-    snr_estimate = min(max(snr_estimate, 0), 40);
+    snr_estimate = min(max(snr_estimate, 0), 40);  % 限制范围
 end

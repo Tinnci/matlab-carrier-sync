@@ -1,3 +1,5 @@
 /concat_matlab_files.ps1
 /matlab_files.md
 sync_results.txt
+optimization_results.csv
+sync_results.csv

@@ -1,5 +1,5 @@
 % pll_sync.m
-function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier, loop_bw, damping, freq_max)
+function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier, loop_bw, damping, freq_max, modulation_type)
     % 基于锁相环（PLL）的载波同步
     % 输入参数:
     %   signal: 输入信号
@@ -8,6 +8,7 @@ function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier
     %   loop_bw: 环路带宽
     %   damping: 阻尼系数
     %   freq_max: 最大频率偏移 (Hz)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
@@ -55,13 +56,29 @@ function [freq_error, snr_estimate, debug_info] = pll_sync(signal, fs, f_carrier
     avg_freq = mean(freq_history(steady_state_start:end));
     freq_error = avg_freq;
 
-    % 计算SNR估计
-    I_steady = I_arm(steady_state_start:end);
-    Q_steady = Q_arm(steady_state_start:end);
-    signal_power = mean(I_steady.^2);
-    noise_power = mean(Q_steady.^2);
+    % 使用同步后的频率进行解调以计算 SNR
+    synchronized_freq = f_carrier + freq_error;
+    t_sync = (steady_state_start:N)/fs;  % 修正为 (steady_state_start:N)/fs
+    I_steady = signal(steady_state_start:end) .* cos(2*pi*synchronized_freq*t_sync);
+    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*synchronized_freq*t_sync);
+
+    % 计算信号功率和噪声功率
+    if strcmp(modulation_type, 'BPSK')
+        % 对于 BPSK，Q 分支主要包含噪声
+        signal_power = mean(I_steady.^2);
+        noise_power = mean(Q_steady.^2);
+    elseif strcmp(modulation_type, 'QPSK')
+        % 对于 QPSK，I 和 Q 分支都包含信号
+        signal_power = mean(I_steady.^2 + Q_steady.^2) / 2;
+        % 估计噪声功率（使用均值残差）
+        noise_power = mean((I_steady - mean(I_steady)).^2 + (Q_steady - mean(Q_steady)).^2) / 2;
+    else
+        error('Unsupported modulation type: %s', modulation_type);
+    end
+
+    % 计算 SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
-    snr_estimate = min(max(snr_estimate, 0), 40);
+    snr_estimate = min(max(snr_estimate, 0), 40);  % 限制范围
 
     % 收集调试信息
     debug_info = struct(...

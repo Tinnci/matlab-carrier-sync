@@ -1,5 +1,5 @@
 % improved_costas_sync.m
-function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, fs, f_carrier, noise_bw, damping, freq_max)
+function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type)
     % 改进的Costas环载波同步
     % 输入参数:
     %   signal: 输入信号
@@ -8,6 +8,7 @@ function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, f
     %   noise_bw: 噪声带宽
     %   damping: 阻尼系数
     %   freq_max: 最大频率偏移 (Hz)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
@@ -60,14 +61,14 @@ function [freq_error, snr_estimate, debug_info] = improved_costas_sync(signal, f
     end
 
     % 使用稳态数据计算最终结果
-    [freq_error, snr_estimate] = calculate_final_estimates_tracked(freq_history, I_arm, Q_arm, fs, f_carrier);
+    [freq_error, snr_estimate] = calculate_final_estimates_tracked(freq_history, I_arm, Q_arm, fs, f_carrier, modulation_type);
 
     % 收集调试信息，并添加 freq_error 字段
     debug_info = struct(...
         'freq_history', freq_history * fs / (2 * pi), ...
         'phase_history', phase_history, ...
         'error_signal', error, ...
-        'freq_error', freq_error);  % 添加 freq_error 字段
+        'freq_error', freq_error);
 end
 
 function error = improved_phase_detector(I, Q)
@@ -80,7 +81,7 @@ function error = improved_phase_detector(I, Q)
     error = error .* confidence;
 end
 
-function [freq_error, snr_estimate] = calculate_final_estimates_tracked(freq_history, I_arm, Q_arm, fs, f_carrier)
+function [freq_error, snr_estimate] = calculate_final_estimates_tracked(freq_history, I_arm, Q_arm, fs, f_carrier, modulation_type)
     % 计算最终估计值
     N = length(freq_history);
     steady_state_start = floor(N * 0.6);  % 使用后40%的数据

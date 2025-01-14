@@ -21,6 +21,9 @@ function best_params = optimize_costas_params()
     damping_range = [0.4, 0.5, 0.6, 0.707, 1.0];  % 包含更低的阻尼系数
     freq_max_range = [10, 25, 50, 100, 150];  % 扩展到150Hz
 
+    % 调制方式
+    modulation_types = {'BPSK', 'QPSK'};
+
     % 使用 ndgrid 生成所有组合
     [A, B, C] = ndgrid(noise_bw_range, damping_range, freq_max_range);
     param_combinations = [A(:), B(:), C(:)];
@@ -45,37 +48,55 @@ function best_params = optimize_costas_params()
         freq_max = param_combinations(idx, 3);
 
         % 当前参数组合的性能统计
-        freq_errors = zeros(1, length(freq_offsets) * length(snrs) * monte_carlo_runs);
-        snr_errors = zeros(1, length(freq_offsets) * length(snrs) * monte_carlo_runs);
+        total_tests = length(modulation_types) * length(freq_offsets) * length(snrs) * monte_carlo_runs;
+        freq_errors = zeros(1, total_tests);
+        snr_errors = zeros(1, total_tests);
         error_idx = 1;
 
-        % 对每种测试条件进行多次Monte Carlo测试
-        for f_offset = freq_offsets
-            for snr = snrs
-                for run = 1:monte_carlo_runs
-                    % 生成预先的信号模板
-                    t = 0:1/fs:signal_length;
-                    modulated_signal = cos(2*pi*(f_carrier + f_offset)*t);
-                    
-                    % 使用不同的随机种子确保每次运行的随机性
-                    rng(run);  
-                    noisy_signal = awgn(modulated_signal, snr, 'measured');
+        % 对每种调制方式进行测试
+        for mod_idx = 1:length(modulation_types)
+            modulation_type = modulation_types{mod_idx};
 
-                    % 使用当前参数进行同步测试
-                    [freq_error, snr_est] = test_costas_params(noisy_signal, fs, f_carrier, ...
-                        noise_bw, damping, freq_max);
+            % 对每种测试条件进行多次Monte Carlo测试
+            for f_offset = freq_offsets
+                for snr = snrs
+                    for run = 1:monte_carlo_runs
+                        % 生成预先的信号模板
+                        t = 0:1/fs:signal_length;
+                        % 初始化 modulated_signal 以避免未初始化警告
+                        modulated_signal = zeros(1, length(t));
 
-                    % 计算误差
-                    if f_offset ~=0
-                        freq_err_percent = abs((freq_error - f_offset)/f_offset) * 100;
-                    else
-                        freq_err_percent = 0;
+                        switch modulation_type
+                            case 'BPSK'
+                                data = randi([0 1], 1, length(t));
+                                bpsk_signal = 2*data - 1;
+                                modulated_signal = bpsk_signal .* cos(2*pi*(f_carrier + f_offset)*t);
+                            case 'QPSK'
+                                data_I = 2*randi([0 1],1,length(t)) -1;  % I分量：-1 或 +1
+                                data_Q = 2*randi([0 1],1,length(t)) -1;  % Q分量：-1 或 +1
+                                modulated_signal = data_I .* cos(2*pi*(f_carrier + f_offset)*t) + ...
+                                                   data_Q .* sin(2*pi*(f_carrier + f_offset)*t);
+                            otherwise
+                                error('Unsupported modulation type: %s', modulation_type);
+                        end
+                        noisy_signal = awgn(modulated_signal, snr, 'measured');
+
+                        % 使用当前参数进行同步测试
+                        [freq_error, snr_est] = test_costas_params(noisy_signal, fs, f_carrier, ...
+                            noise_bw, damping, freq_max, modulation_type);
+
+                        % 计算误差
+                        if f_offset ~=0
+                            freq_err_percent = abs((freq_error - f_offset)/f_offset) * 100;
+                        else
+                            freq_err_percent = 0;
+                        end
+                        snr_err_db = abs(snr_est - snr);
+
+                        freq_errors(error_idx) = freq_err_percent;
+                        snr_errors(error_idx) = snr_err_db;
+                        error_idx = error_idx + 1;
                     end
-                    snr_err_db = abs(snr_est - snr);
-
-                    freq_errors(error_idx) = freq_err_percent;
-                    snr_errors(error_idx) = snr_err_db;
-                    error_idx = error_idx + 1;
                 end
             end
         end
@@ -129,7 +150,7 @@ function best_params = optimize_costas_params()
     fprintf('优化完成，结果已保存到 optimization_results.csv\n');
 end
 
-function [freq_error, snr_estimate] = test_costas_params(signal, fs, f_carrier, noise_bw, damping, freq_max)
+function [freq_error, snr_estimate] = test_costas_params(signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type)
     % 用于测试特定参数组合的Costas环性能
 
     % 频率限幅设置
@@ -178,11 +199,27 @@ function [freq_error, snr_estimate] = test_costas_params(signal, fs, f_carrier, 
     avg_freq_radians = mean(freq_history(steady_state_start:end));
     freq_error = avg_freq_radians * fs / (2 * pi);
 
-    % 计算SNR估计
-    I_steady = I_arm(steady_state_start:end);
-    Q_steady = Q_arm(steady_state_start:end);
-    signal_power = mean(I_steady.^2);
-    noise_power = mean(Q_steady.^2);
+    % 使用同步后的频率进行解调以计算 SNR
+    synchronized_freq = f_carrier + freq_error;
+    t_sync = (steady_state_start:N)/fs;  % 修正为 (steady_state_start:N)/fs
+    I_steady = signal(steady_state_start:end) .* cos(2*pi*synchronized_freq*t_sync);
+    Q_steady = signal(steady_state_start:end) .* -sin(2*pi*synchronized_freq*t_sync);
+
+    % 计算信号功率和噪声功率
+    if strcmp(modulation_type, 'BPSK')
+        % 对于 BPSK，Q 分支主要包含噪声
+        signal_power = mean(I_steady.^2);
+        noise_power = mean(Q_steady.^2);
+    elseif strcmp(modulation_type, 'QPSK')
+        % 对于 QPSK，I 和 Q 分支都包含信号
+        signal_power = mean(I_steady.^2 + Q_steady.^2) / 2;
+        % 估计噪声功率（使用均值残差）
+        noise_power = mean((I_steady - mean(I_steady)).^2 + (Q_steady - mean(Q_steady)).^2) / 2;
+    else
+        error('Unsupported modulation type: %s', modulation_type);
+    end
+
+    % 计算SNR
     snr_estimate = 10 * log10(signal_power / noise_power);
     snr_estimate = min(max(snr_estimate, 0), 40);
 end

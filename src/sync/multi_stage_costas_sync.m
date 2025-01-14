@@ -1,5 +1,5 @@
 % multi_stage_costas_sync.m
-function [freq_error, snr_estimate, debug_info] = multi_stage_costas_sync(signal, fs, f_carrier, noise_bw, damping, freq_max)
+function [freq_error, snr_estimate, debug_info] = multi_stage_costas_sync(signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type)
     % 多级Costas环同步器
     % 输入参数:
     %   signal: 输入信号
@@ -8,20 +8,21 @@ function [freq_error, snr_estimate, debug_info] = multi_stage_costas_sync(signal
     %   noise_bw: 噪声带宽 (优化后的)
     %   damping: 阻尼系数 (优化后的)
     %   freq_max: 最大频率偏移 (Hz) (优化后的)
+    %   modulation_type: 'BPSK' 或 'QPSK'
     % 输出参数:
     %   freq_error: 估计的频率误差 (Hz)
     %   snr_estimate: 估计的信噪比 (dB)
     %   debug_info: 调试信息结构体
 
     % 第一级：FFT粗搜索
-    [coarse_freq_error, initial_snr] = wide_range_fft_search(signal, fs, f_carrier, 2^nextpow2(length(signal)), 200);  % 扩展到±200Hz
+    [coarse_freq_error, initial_snr] = wide_range_fft_search(signal, fs, f_carrier, 2^nextpow2(length(signal)), 200);
 
     % 第二级：分段精细搜索
-    [refined_freq_error, refined_snr] = fine_grid_search(signal, fs, f_carrier, coarse_freq_error, 50);  % 扩展到±50Hz
+    [refined_freq_error, refined_snr] = fine_grid_search(signal, fs, f_carrier, coarse_freq_error, 50);
 
     % 第三级：改进的Costas环精确跟踪（使用优化后的参数）
     [final_freq_error, final_snr, tracking_info] = improved_costas_sync(...
-        signal, fs, f_carrier, noise_bw, damping, freq_max);  % 使用优化后的参数
+        signal, fs, f_carrier, noise_bw, damping, freq_max, modulation_type);
 
     % 返回最终结果
     freq_error = final_freq_error;
@@ -106,6 +107,9 @@ function [freq_error, snr] = fine_grid_search(signal, fs, f_carrier, coarse_erro
         % 分段处理
         for seg = 1:num_segments
             idx = (seg-1)*segment_length + (1:segment_length);
+            if max(idx) > length(signal)
+                break;
+            end
             t = (idx-1)/fs;
             test_signal = exp(-1j*2*pi*f_test*t);
             segment_correlation = abs(sum(signal(idx).*test_signal));

@@ -66,35 +66,35 @@ function test_sync_methods()
                 % 测试各种方法
                 % 1. 平方律法
                 tic;
-                [freq_error1, snr_est1] = square_law_sync(noisy_signal, fs, f_carrier);
+                [freq_error1, snr_est1] = square_law_sync(noisy_signal, fs, f_carrier, current_mod);
                 time1 = toc;
 
                 % 2. 原始Costas环法（使用优化后的参数）
                 tic;
                 [freq_error2, snr_est2] = costas_loop_sync(noisy_signal, fs, f_carrier, ...
-                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                    best_params.noise_bw, best_params.damping, best_params.freq_max, current_mod);
                 time2 = toc;
 
                 % 3. 改进Costas环法（使用优化后的参数）
                 tic;
                 [freq_error3, snr_est3, ~] = improved_costas_sync(noisy_signal, fs, f_carrier, ...
-                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                    best_params.noise_bw, best_params.damping, best_params.freq_max, current_mod);
                 time3 = toc;
 
                 % 4. 多级同步法（使用优化后的参数）
                 tic;
                 [freq_error4, snr_est4, ~] = multi_stage_costas_sync(noisy_signal, fs, f_carrier, ...
-                    best_params.noise_bw, best_params.damping, best_params.freq_max);
+                    best_params.noise_bw, best_params.damping, best_params.freq_max, current_mod);
                 time4 = toc;
 
                 % 5. PLL同步法
                 tic;
-                [freq_error5, snr_est5, ~] = pll_sync(noisy_signal, fs, f_carrier, 1, 0.707, best_params.freq_max);
+                [freq_error5, snr_est5, ~] = pll_sync(noisy_signal, fs, f_carrier, 1, 0.707, best_params.freq_max, current_mod);
                 time5 = toc;
 
                 % 6. 粒子滤波器同步法
                 tic;
-                [freq_error6, snr_est6, ~] = particle_filter_sync(noisy_signal, fs, f_carrier, 100, best_params.freq_max);
+                [freq_error6, snr_est6, ~] = particle_filter_sync(noisy_signal, fs, f_carrier, 100, best_params.freq_max, current_mod);
                 time6 = toc;
 
                 % 计算频率误差精度
