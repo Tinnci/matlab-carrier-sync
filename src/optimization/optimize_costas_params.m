@@ -1,3 +1,4 @@
+% optimize_costas_params.m
 %{
 问题描述：
 Costas环参数优化器的开发背景：
@@ -30,7 +31,7 @@ function best_params = optimize_costas_params()
     %   best_params: 结构体，包含最优参数
     
     % 测试参数设置
-    freq_offsets = [0.5, 1, 2, 5, 10, 20];  % Hz
+    freq_offsets = [0.5, 1, 2, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];  % Hz 扩展到100Hz
     snrs = [10, 20, 30];  % dB
     fs = 1000;  % Hz
     f_carrier = 100;  % Hz
@@ -38,9 +39,9 @@ function best_params = optimize_costas_params()
     monte_carlo_runs = 10;  % 每组参数测试次数
     
     % 参数搜索范围
-    noise_bw_range = [0.01, 0.02, 0.05, 0.1, 0.2];
-    damping_range = [0.5, 0.707, 1.0];
-    freq_max_range = [10, 25, 50, 100];  % Hz
+    noise_bw_range = [0.01, 0.02, 0.05, 0.1, 0.2, 0.3];  % 扩展到0.3
+    damping_range = [0.4, 0.5, 0.6, 0.707, 1.0];  % 包含更低的阻尼系数
+    freq_max_range = [10, 25, 50, 100, 150];  % 扩展到150Hz
     
     % 初始化最优结果
     best_score = -inf;
@@ -177,4 +178,4 @@ function [freq_error, snr_estimate] = test_costas_params(signal, fs, f_carrier, 
     noise_power = mean(Q_steady.^2);
     snr_estimate = 10 * log10(signal_power / noise_power);
     snr_estimate = min(max(snr_estimate, 0), 40);
-end 
+end

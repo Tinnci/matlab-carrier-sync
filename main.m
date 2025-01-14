@@ -8,7 +8,6 @@ current_dir = fileparts(mfilename('fullpath'));
 addpath(fullfile(current_dir, 'src', 'sync'));
 addpath(fullfile(current_dir, 'src', 'optimization'));
 addpath(fullfile(current_dir, 'test', 'sync'));
-addpath(fullfile(current_dir, 'utils', 'common'));
 
 % 清理工作空间
 clear;
